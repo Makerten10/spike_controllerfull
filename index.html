@@ -1,92 +1,248 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <title>LEGO SPIKE USB Controller</title>
-    <style>
-        body { font-family: sans-serif; background: #121212; color: #fff; text-align: center; padding: 30px; }
-        button { background: #ffcc00; color: #000; border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; margin: 15px; }
-        button:hover { background: #e6b800; }
-        .box { background: #1e1e1e; padding: 25px; border-radius: 12px; display: inline-block; margin-top: 20px; width: 380px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-        .status { font-weight: bold; margin: 12px 0; font-size: 16px; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LEGO SPIKE Tanque USB</title>
+<style>
+  body { font-family: sans-serif; background: #121212; color: #fff; text-align: center; padding: 20px; }
+  button { background: #ffcc00; color: #000; border: none; padding: 14px 28px; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; margin: 10px; }
+  button:hover { background: #e6b800; }
+  button:disabled { background: #666; cursor: not-allowed; }
+  .box { background: #1e1e1e; padding: 20px; border-radius: 12px; display: inline-block; margin: 10px; width: 380px; vertical-align: top; box-shadow: 0 4px 10px rgba(0,0,0,.5); text-align: left; }
+  .box h3 { text-align: center; margin-top: 0; }
+  .status { font-weight: bold; margin: 10px 0; font-size: 16px; text-align: center; }
+  .red { color: #ff4444; } .green { color: #00ff66; }
+  label { display: block; margin: 8px 0; }
+  .bar { background: #333; height: 14px; border-radius: 7px; position: relative; margin: 4px 0 10px; overflow: hidden; }
+  .bar > i { position: absolute; top: 0; bottom: 0; background: #ffcc00; }
+  .bar::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: #888; }
+  small { color: #aaa; }
+</style>
 </head>
 <body>
-    <h1>Controlador LEGO SPIKE Prime (USB)</h1>
-    
-    <div class="box">
-        <h3>Conexión del Hub</h3>
-        <button id="connectBtn">Conectar Hub (USB)</button>
-        <div id="hubStatus" class="status" style="color: #ff4444;">Desconectado</div>
-    </div>
+<h1>Tanque LEGO SPIKE Prime (USB)</h1>
 
-    <br>
+<div class="box">
+  <h3>Conexión del Hub</h3>
+  <div style="text-align:center">
+    <button id="connectBtn">Conectar Hub (USB)</button>
+    <button id="disconnectBtn" disabled>Desconectar</button>
+  </div>
+  <div id="hubStatus" class="status red">Desconectado</div>
+  <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el puerto USB solo puede usarlo una página a la vez. Usa Chrome o Edge.</small>
+</div>
 
-    <div class="box">
-        <h3>Estado del Mando</h3>
-        <div id="gpStatus" class="status" style="color: #ff4444;">Pulsa cualquier botón del mando</div>
-    </div>
+<div class="box">
+  <h3>Mando</h3>
+  <div id="gpStatus" class="status red">Pulsa cualquier botón del mando</div>
+  <small>Stick izquierdo: conducir · Stick derecho (horizontal): torreta</small>
+</div>
 
-    <script>
-        let serialPort = null;
-        let serialWriter = null;
-        let connected = false;
+<br>
 
-        document.getElementById('connectBtn').addEventListener('click', async () => {
-            try {
-                // Solicitar puerto serie USB al navegador
-                serialPort = await navigator.serial.requestPort();
-                await serialPort.open({ baudRate: 115200 });
-                serialWriter = serialPort.writable.getWriter();
-                connected = true;
-                document.getElementById('hubStatusinnerText = "¡Conectado por USB!";
-                document.getElementById('hubStatus').style.color = "#00ff00";
-            } catch (err) {
-                alert("Error al conectar por USB: " + err);
-            }
-        });
+<div class="box">
+  <h3>Motores</h3>
+  <div>A (izq.) <span id="vA">0</span><div class="bar"><i id="bA"></i></div></div>
+  <div>B (izq.) <span id="vB">0</span><div class="bar"><i id="bB"></i></div></div>
+  <div>C (der.) <span id="vC">0</span><div class="bar"><i id="bC"></i></div></div>
+  <div>D (der.) <span id="vD">0</span><div class="bar"><i id="bD"></i></div></div>
+  <div>E (torreta) <span id="vE">0</span><div class="bar"><i id="bE"></i></div></div>
+</div>
 
-        async function sendCommand(cmdObj) {
-            if (!connected || !serialWriter) return;
-            try {
-                const data = JSON.stringify(cmdObj) + "\n";
-                await serialWriter.write(new TextEncoder().encode(data));
-            } catch (e) {
-                console.error(e);
-            }
+<div class="box">
+  <h3>Ajustes y sensor</h3>
+  <label><input type="checkbox" id="invL"> Invertir motores izquierdos (A, B)</label>
+  <label><input type="checkbox" id="invR" checked> Invertir motores derechos (C, D)</label>
+  <label><input type="checkbox" id="invE"> Invertir torreta (E)</label>
+  <label><input type="checkbox" id="obsStop"> Frenar al avanzar si hay obstáculo a menos de
+    <input type="number" id="obsDist" value="10" min="3" max="100" style="width:60px"> cm</label>
+  <div class="status">Distancia (F): <span id="dist">—</span></div>
+</div>
+
+<script>
+  let port = null, writer = null, reader = null;
+  let connected = false, sending = false;
+  let lastKey = "", lastSend = 0;
+  let distance = null;
+
+  const $ = id => document.getElementById(id);
+
+  function setHub(text, ok) {
+    $('hubStatus').textContent = text;
+    $('hubStatus').className = 'status ' + (ok ? 'green' : 'red');
+  }
+
+  // ---------- Conexión ----------
+  $('connectBtn').addEventListener('click', async () => {
+    if (!('serial' in navigator)) {
+      alert("Tu navegador no soporta Web Serial. Usa Chrome o Edge.");
+      return;
+    }
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      writer = port.writable.getWriter();
+      connected = true;
+      setHub("¡Conectado por USB!", true);
+      $('connectBtn').disabled = true;
+      $('disconnectBtn').disabled = false;
+      lastKey = "";
+      readLoop();
+    } catch (err) {
+      alert("Error al conectar por USB: " + err +
+            "\n\n¿Está abierta la web oficial de LEGO con el hub conectado? Ciérrala o desconecta el hub allí.");
+    }
+  });
+
+  $('disconnectBtn').addEventListener('click', disconnect);
+
+  async function disconnect() {
+    if (!connected) return;
+    try { await send({ cmd: "stop" }, true); } catch (e) {}
+    connected = false;
+    try { if (reader) await reader.cancel(); } catch (e) {}
+    try { if (writer) { writer.releaseLock(); } } catch (e) {}
+    try { await port.close(); } catch (e) {}
+    port = writer = reader = null;
+    distance = null;
+    $('dist').textContent = "—";
+    setHub("Desconectado", false);
+    $('connectBtn').disabled = false;
+    $('disconnectBtn').disabled = true;
+  }
+
+  // ---------- Lectura del hub (sensor de distancia) ----------
+  async function readLoop() {
+    const dec = new TextDecoder();
+    let buf = "";
+    while (port && port.readable && connected) {
+      reader = port.readable.getReader();
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n")) >= 0) {
+            handleLine(buf.slice(0, i).trim());
+            buf = buf.slice(i + 1);
+          }
         }
+      } catch (e) {
+        // puerto desconectado o error de lectura
+      } finally {
+        try { reader.releaseLock(); } catch (e) {}
+      }
+      if (!connected) break;
+    }
+    if (connected) disconnect();
+  }
 
-        // Detección del mando
-        window.addEventListener("gamepadconnected", (e) => {
-            document.getElementById('gpStatus').innerText = "Conectado: " + e.gamepad.id;
-            document.getElementById('gpStatus').style.color = "#00ff00";
-        });
+  function handleLine(line) {
+    if (!line.startsWith("{")) return; // ignora eco del REPL
+    try {
+      const msg = JSON.parse(line);
+      if ("dist" in msg) {
+        distance = msg.dist;
+        $('dist').textContent = (distance === null) ? "sin lectura" : distance + " cm";
+      }
+    } catch (e) {}
+  }
 
-        // Bucle de lectura de los joysticks del mando para mover los motores A y B
-        setInterval(() => {
-            const gamepads = navigator.getGamepads();
-            if (!gamepads[0]) return;
-            const gp = gamepads[0];
-            
-            // Eje vertical izquierdo para avanzar/retroceder (-1 arriba, 1 abajo)
-            let throttle = -gp.axes[1] * 100; 
-            let steering = (gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[3]) * 50;   // Eje horizontal para girar
+  // ---------- Envío ----------
+  async function send(obj, force = false) {
+    if (!connected || !writer) return;
+    if (sending && !force) return; // evita acumular mensajes
+    sending = true;
+    try {
+      await writer.write(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      sending = false;
+    }
+  }
 
-            let leftSpeed = Math.round(throttle + steering);
-            let rightSpeed = Math.round(throttle - steering);
+  // ---------- Mando ----------
+  window.addEventListener("gamepadconnected", e => {
+    $('gpStatus').textContent = "Conectado: " + e.gamepad.id;
+    $('gpStatus').className = 'status green';
+  });
+  window.addEventListener("gamepaddisconnected", () => {
+    $('gpStatus').textContent = "Mando desconectado";
+    $('gpStatus').className = 'status red';
+  });
 
-            // Limitar valores entre -100 y 100
-            leftSpeed = Math.max(-100, Math.min(100, leftSpeed));
-            rightSpeed = Math.max(-100, Math.min(100, rightSpeed));
+  function getPad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const p of pads) if (p) return p;
+    return null;
+  }
 
-            if (Math.abs(throttle) > 5 || Math.abs(steering) > 5) {
-                sendCommand({ cmd: "motor.run", port: "A", speed: leftSpeed });
-                sendCommand({ cmd: "motor.run", port: "B", speed: rightSpeed });
-            } else {
-                sendCommand({ cmd: "motor.stop", port: "A" });
-                sendCommand({ cmd: "motor.stop", port: "B" });
-            }
-        }, 50);
-    </script>
+  const dz = v => Math.abs(v) < 0.12 ? 0 : v;
+  const clamp = v => Math.max(-100, Math.min(100, Math.round(v)));
+
+  function showMotor(k, v) {
+    $('v' + k).textContent = v;
+    const b = $('b' + k);
+    b.style.left = (v >= 0 ? 50 : 50 + v / 2) + "%";
+    b.style.width = Math.abs(v) / 2 + "%";
+  }
+
+  setInterval(() => {
+    const gp = getPad();
+    let throttle = 0, steer = 0, turret = 0;
+
+    if (gp) {
+      steer    = dz(gp.axes[0] || 0);     // stick izq. horizontal
+      throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
+      turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
+    }
+
+    // Freno de obstáculos (solo al avanzar)
+    if ($('obsStop').checked && distance !== null && distance < Number($('obsDist').value) && throttle > 0) {
+      throttle = 0;
+    }
+
+    // Mezcla tipo tanque
+    let left = throttle + steer;
+    let right = throttle - steer;
+    const m = Math.max(1, Math.abs(left), Math.abs(right));
+    left = left / m * 100;
+    right = right / m * 100;
+
+    const sL = $('invL').checked ? -1 : 1;
+    const sR = $('invR').checked ? -1 : 1;
+    const sE = $('invE').checked ? -1 : 1;
+
+    const motors = {
+      A: clamp(left * sL),
+      B: clamp(left * sL),
+      C: clamp(right * sR),
+      D: clamp(right * sR),
+      E: clamp(turret * 60 * sE)
+    };
+
+    for (const k of Object.keys(motors)) showMotor(k, motors[k]);
+
+    const msg = { cmd: "motors", ...motors };
+    const key = JSON.stringify(motors);
+    const now = performance.now();
+    // Enviar si cambia, o como latido cada 200 ms (el hub frena si no recibe nada)
+    if (key !== lastKey || now - lastSend > 200) {
+      lastKey = key;
+      lastSend = now;
+      send(msg);
+    }
+  }, 50);
+
+  // Frenar si se cierra la pestaña
+  window.addEventListener("beforeunload", () => {
+    if (connected && writer) {
+      writer.write(new TextEncoder().encode(JSON.stringify({ cmd: "stop" }) + "\n"));
+    }
+  });
+</script>
 </body>
 </html>
