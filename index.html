@@ -22,7 +22,7 @@
 </head>
 <body>
 <h1>Tanque LEGO SPIKE Prime (USB)</h1>
-
+ 
 <div class="box">
   <h3>Conexión del Hub</h3>
   <div style="text-align:center">
@@ -30,17 +30,23 @@
     <button id="disconnectBtn" disabled>Desconectar</button>
   </div>
   <div id="hubStatus" class="status red">Desconectado</div>
+  <div style="text-align:center">
+    <button id="uploadBtn" disabled style="font-size:15px;padding:10px 16px">1) Subir y ejecutar bridge</button>
+    <button id="testBtn" disabled style="font-size:15px;padding:10px 16px">2) Probar motor A</button>
+  </div>
+  <pre id="log" style="background:#000;color:#9f9;font-size:12px;height:120px;overflow:auto;white-space:pre-wrap;margin:8px 0;padding:6px;border-radius:6px">Registro del hub...</pre>
   <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el puerto USB solo puede usarlo una página a la vez. Usa Chrome o Edge.</small>
 </div>
-
+ 
 <div class="box">
   <h3>Mando</h3>
   <div id="gpStatus" class="status red">Pulsa cualquier botón del mando</div>
   <small>Stick izquierdo: conducir · Stick derecho (horizontal): torreta</small>
+  <div id="axesInfo" style="font-family:monospace;font-size:12px;color:#9f9;margin-top:8px;text-align:center"></div>
 </div>
-
+ 
 <br>
-
+ 
 <div class="box">
   <h3>Motores</h3>
   <div>A (izq.) <span id="vA">0</span><div class="bar"><i id="bA"></i></div></div>
@@ -49,7 +55,7 @@
   <div>D (der.) <span id="vD">0</span><div class="bar"><i id="bD"></i></div></div>
   <div>E (torreta) <span id="vE">0</span><div class="bar"><i id="bE"></i></div></div>
 </div>
-
+ 
 <div class="box">
   <h3>Ajustes y sensor</h3>
   <label><input type="checkbox" id="invL"> Invertir motores izquierdos (A, B)</label>
@@ -59,20 +65,20 @@
     <input type="number" id="obsDist" value="10" min="3" max="100" style="width:60px"> cm</label>
   <div class="status">Distancia (F): <span id="dist">—</span></div>
 </div>
-
+ 
 <script>
   let port = null, writer = null, reader = null;
   let connected = false, sending = false;
   let lastKey = "", lastSend = 0;
   let distance = null;
-
+ 
   const $ = id => document.getElementById(id);
-
+ 
   function setHub(text, ok) {
     $('hubStatus').textContent = text;
     $('hubStatus').className = 'status ' + (ok ? 'green' : 'red');
   }
-
+ 
   // ---------- Conexión ----------
   $('connectBtn').addEventListener('click', async () => {
     if (!('serial' in navigator)) {
@@ -87,6 +93,9 @@
       setHub("¡Conectado por USB!", true);
       $('connectBtn').disabled = true;
       $('disconnectBtn').disabled = false;
+      $('uploadBtn').disabled = false;
+      $('testBtn').disabled = false;
+      log("— Conectado. Pulsa «1) Subir y ejecutar bridge». —");
       lastKey = "";
       readLoop();
     } catch (err) {
@@ -94,13 +103,16 @@
             "\n\n¿Está abierta la web oficial de LEGO con el hub conectado? Ciérrala o desconecta el hub allí.");
     }
   });
-
+ 
   $('disconnectBtn').addEventListener('click', disconnect);
-
+ 
   async function disconnect() {
     if (!connected) return;
     try { await send({ cmd: "stop" }, true); } catch (e) {}
+    try { await rawWrite(new Uint8Array([3, 3])); } catch (e) {} // Ctrl+C: detiene el bridge
     connected = false;
+    $('uploadBtn').disabled = true;
+    $('testBtn').disabled = true;
     try { if (reader) await reader.cancel(); } catch (e) {}
     try { if (writer) { writer.releaseLock(); } } catch (e) {}
     try { await port.close(); } catch (e) {}
@@ -111,7 +123,7 @@
     $('connectBtn').disabled = false;
     $('disconnectBtn').disabled = true;
   }
-
+ 
   // ---------- Lectura del hub (sensor de distancia) ----------
   async function readLoop() {
     const dec = new TextDecoder();
@@ -124,7 +136,7 @@
           if (done) break;
           buf += dec.decode(value, { stream: true });
           let i;
-          while ((i = buf.indexOf("\n")) >= 0) {
+          while ((i = buf.search(/[\n\r\t]/)) >= 0) {
             handleLine(buf.slice(0, i).trim());
             buf = buf.slice(i + 1);
           }
@@ -138,18 +150,26 @@
     }
     if (connected) disconnect();
   }
-
+ 
   function handleLine(line) {
-    if (!line.startsWith("{")) return; // ignora eco del REPL
+    if (!line) return;
+    let txt = line;
+    // El hub envía su salida cifrada con XOR 3: se descifra si no hay llaves a la vista
+    if (!txt.includes("{")) {
+      txt = Array.from(line, c => String.fromCharCode(c.charCodeAt(0) ^ 3)).join("");
+    }
+    const a = txt.indexOf("{"), b = txt.lastIndexOf("}");
+    if (a < 0 || b < a) { log(txt); return; }
     try {
-      const msg = JSON.parse(line);
+      const msg = JSON.parse(txt.slice(a, b + 1));
+      if (!("dist" in msg)) log(txt.slice(a, b + 1));
       if ("dist" in msg) {
         distance = msg.dist;
         $('dist').textContent = (distance === null) ? "sin lectura" : distance + " cm";
       }
     } catch (e) {}
   }
-
+ 
   // ---------- Envío ----------
   async function send(obj, force = false) {
     if (!connected || !writer) return;
@@ -163,7 +183,139 @@
       sending = false;
     }
   }
-
+ 
+  // ---------- Registro, subida del bridge y prueba ----------
+  let uploading = false;
+  const logEl = $('log');
+  let logLines = [];
+  function log(t) {
+    logLines.push(t);
+    if (logLines.length > 60) logLines.shift();
+    logEl.textContent = logLines.join("\n");
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+ 
+  async function rawWrite(bytes) {
+    if (!writer) return;
+    await writer.write(bytes);
+  }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+ 
+  const BRIDGE = `import json
+import sys
+import uselect
+import utime
+import motor
+import distance_sensor
+from hub import port
+ 
+MOTORS = {"A": port.A, "B": port.B, "C": port.C, "D": port.D, "E": port.E}
+DIST_PORT = port.F
+SPEED_SCALE = 10
+WATCHDOG_MS = 600
+DIST_EVERY_MS = 200
+ 
+poll = uselect.poll()
+poll.register(sys.stdin, uselect.POLLIN)
+last_cmd = utime.ticks_ms()
+last_dist = utime.ticks_ms()
+stopped = False
+ 
+def set_speed(name, spd):
+    try:
+        p = MOTORS[name]
+        if spd == 0:
+            motor.stop(p)
+        else:
+            motor.run(p, int(spd) * SPEED_SCALE)
+    except Exception as e:
+        print(json.dumps({"err": name + ": " + str(e)}))
+ 
+def stop_all():
+    for n in MOTORS:
+        set_speed(n, 0)
+ 
+def read_distance():
+    try:
+        d = distance_sensor.distance(DIST_PORT)
+        if d is not None and d >= 0:
+            return int(d / 10)
+    except Exception:
+        pass
+    return None
+ 
+def handle(req):
+    cmd = req.get("cmd")
+    if cmd == "motors":
+        for n in MOTORS:
+            if n in req:
+                set_speed(n, req[n])
+    elif cmd == "motor.run":
+        set_speed(req.get("port"), req.get("speed", 0))
+    elif cmd == "stop":
+        stop_all()
+ 
+def run():
+    global last_cmd, last_dist, stopped
+    print(json.dumps({"ready": 1}))
+    while True:
+        now = utime.ticks_ms()
+        if poll.poll(10):
+            line = sys.stdin.readline()
+            if line:
+                try:
+                    handle(json.loads(line.strip()))
+                    last_cmd = now
+                    stopped = False
+                except Exception as e:
+                    print(json.dumps({"err": str(e)}))
+        if utime.ticks_diff(now, last_cmd) > WATCHDOG_MS and not stopped:
+            stop_all()
+            stopped = True
+        if utime.ticks_diff(now, last_dist) > DIST_EVERY_MS:
+            last_dist = now
+            print(json.dumps({"dist": read_distance()}))
+ 
+run()
+`;
+ 
+  $('uploadBtn').addEventListener('click', async () => {
+    if (!connected) return;
+    uploading = true;
+    $('uploadBtn').disabled = true;
+    try {
+      log("— Interrumpiendo programa del hub (Ctrl+C)...");
+      await rawWrite(new Uint8Array([3, 3]));
+      await sleep(400);
+      await rawWrite(new Uint8Array([5]));          // Ctrl+E: modo paste
+      await sleep(200);
+      const bytes = new TextEncoder().encode(BRIDGE.replace(/\n/g, "\r\n"));
+      for (let i = 0; i < bytes.length; i += 48) { // en trozos para no saturar el hub
+        await rawWrite(bytes.slice(i, i + 48));
+        await sleep(25);
+      }
+      await rawWrite(new Uint8Array([4]));          // Ctrl+D: ejecutar
+      log("— Bridge enviado. Espera a ver {\"ready\": 1} y valores de dist. —");
+      lastKey = "";
+    } catch (e) {
+      log("Error al subir: " + e);
+    } finally {
+      await sleep(500);
+      uploading = false;
+      $('uploadBtn').disabled = false;
+    }
+  });
+ 
+  $('testBtn').addEventListener('click', async () => {
+    if (!connected) return;
+    log("— Prueba: motor A 40% durante 1 s —");
+    uploading = true; // pausa el bucle del mando
+    await send({ cmd: "motors", A: 40 }, true);
+    await sleep(1000);
+    await send({ cmd: "stop" }, true);
+    uploading = false;
+  });
+ 
   // ---------- Mando ----------
   window.addEventListener("gamepadconnected", e => {
     $('gpStatus').textContent = "Conectado: " + e.gamepad.id;
@@ -173,49 +325,71 @@
     $('gpStatus').textContent = "Mando desconectado";
     $('gpStatus').className = 'status red';
   });
-
+ 
+  let padBlocked = false;
+  let lastPadId = "";
   function getPad() {
-    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (const p of pads) if (p) return p;
+    if (padBlocked) return null;
+    try {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const p of pads) if (p) return p;
+    } catch (e) {
+      padBlocked = true;
+      $('gpStatus').textContent = "Mando bloqueado por el navegador. Abre este archivo directamente en Chrome/Edge (no dentro de una vista previa).";
+      $('gpStatus').className = 'status red';
+    }
     return null;
   }
-
+ 
+  if (window.self !== window.top) {
+    $('gpStatus').textContent = "Estás en un iframe: el mando y el USB están bloqueados. Descarga el archivo y ábrelo directamente en Chrome/Edge.";
+    $('gpStatus').className = 'status red';
+  }
+ 
   const dz = v => Math.abs(v) < 0.12 ? 0 : v;
   const clamp = v => Math.max(-100, Math.min(100, Math.round(v)));
-
+ 
   function showMotor(k, v) {
     $('v' + k).textContent = v;
     const b = $('b' + k);
     b.style.left = (v >= 0 ? 50 : 50 + v / 2) + "%";
     b.style.width = Math.abs(v) / 2 + "%";
   }
-
+ 
   setInterval(() => {
     const gp = getPad();
+    if (gp && gp.id !== lastPadId) {
+      lastPadId = gp.id;
+      $('gpStatus').textContent = "Conectado: " + gp.id;
+      $('gpStatus').className = 'status green';
+    }
+    if (gp) {
+      $('axesInfo').textContent = "Ejes: " + Array.from(gp.axes, a => a.toFixed(2)).join(" · ");
+    }
     let throttle = 0, steer = 0, turret = 0;
-
+ 
     if (gp) {
       steer    = dz(gp.axes[0] || 0);     // stick izq. horizontal
       throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
       turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
     }
-
+ 
     // Freno de obstáculos (solo al avanzar)
     if ($('obsStop').checked && distance !== null && distance < Number($('obsDist').value) && throttle > 0) {
       throttle = 0;
     }
-
+ 
     // Mezcla tipo tanque
     let left = throttle + steer;
     let right = throttle - steer;
     const m = Math.max(1, Math.abs(left), Math.abs(right));
     left = left / m * 100;
     right = right / m * 100;
-
+ 
     const sL = $('invL').checked ? -1 : 1;
     const sR = $('invR').checked ? -1 : 1;
     const sE = $('invE').checked ? -1 : 1;
-
+ 
     const motors = {
       A: clamp(left * sL),
       B: clamp(left * sL),
@@ -223,20 +397,20 @@
       D: clamp(right * sR),
       E: clamp(turret * 60 * sE)
     };
-
+ 
     for (const k of Object.keys(motors)) showMotor(k, motors[k]);
-
+ 
     const msg = { cmd: "motors", ...motors };
     const key = JSON.stringify(motors);
     const now = performance.now();
     // Enviar si cambia, o como latido cada 200 ms (el hub frena si no recibe nada)
-    if (key !== lastKey || now - lastSend > 200) {
+    if (!uploading && (key !== lastKey || now - lastSend > 200)) {
       lastKey = key;
       lastSend = now;
       send(msg);
     }
   }, 50);
-
+ 
   // Frenar si se cierra la pestaña
   window.addEventListener("beforeunload", () => {
     if (connected && writer) {
@@ -246,3 +420,4 @@
 </script>
 </body>
 </html>
+ 
