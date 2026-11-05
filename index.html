@@ -5,23 +5,394 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LEGO SPIKE Tanque USB</title>
 <style>
-  body { font-family: sans-serif; background: #121212; color: #fff; text-align: center; padding: 20px; }
-  button { background: #ffcc00; color: #000; border: none; padding: 14px 28px; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer; margin: 10px; }
-  button:hover { background: #e6b800; }
-  button:disabled { background: #666; cursor: not-allowed; }
-  .box { background: #1e1e1e; padding: 20px; border-radius: 12px; display: inline-block; margin: 10px; width: 380px; vertical-align: top; box-shadow: 0 4px 10px rgba(0,0,0,.5); text-align: left; }
-  .box h3 { text-align: center; margin-top: 0; }
-  .status { font-weight: bold; margin: 10px 0; font-size: 16px; text-align: center; }
-  .red { color: #ff4444; } .green { color: #00ff66; }
-  label { display: block; margin: 8px 0; }
-  .bar { background: #333; height: 14px; border-radius: 7px; position: relative; margin: 4px 0 10px; overflow: hidden; }
-  .bar > i { position: absolute; top: 0; bottom: 0; background: #ffcc00; }
-  .bar::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: #888; }
-  small { color: #aaa; }
+  :root {
+    color-scheme: dark;
+    --bg: #080d16;
+    --panel: rgba(17, 27, 43, .88);
+    --panel-2: #111d2e;
+    --line: rgba(148, 174, 207, .16);
+    --text: #edf4ff;
+    --muted: #8ea2bd;
+    --accent: #f5b82e;
+    --accent-2: #ffda75;
+    --green: #38d996;
+    --red: #ff6477;
+    --blue: #69a9ff;
+    --shadow: 0 18px 45px rgba(0,0,0,.28);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    padding: 34px clamp(14px, 3vw, 42px) 48px;
+    color: var(--text);
+    text-align: left;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(ellipse at 12% 0%, rgba(45, 92, 150, .22), transparent 38%),
+      radial-gradient(ellipse at 95% 12%, rgba(245, 184, 46, .10), transparent 30%),
+      linear-gradient(145deg, #080d16 0%, #0b1422 48%, #080e18 100%);
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: .16;
+    background-image: linear-gradient(rgba(150,180,220,.07) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(150,180,220,.07) 1px, transparent 1px);
+    background-size: 34px 34px;
+    mask-image: linear-gradient(to bottom, black, transparent 85%);
+  }
+
+  h1 {
+    position: relative;
+    max-width: 1240px;
+    margin: 0 auto 26px;
+    padding: 4px 0 20px 18px;
+    border-bottom: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    font-size: clamp(25px, 3.5vw, 38px);
+    line-height: 1.15;
+    letter-spacing: -.8px;
+    font-weight: 800;
+    text-shadow: 0 5px 25px rgba(0,0,0,.3);
+  }
+
+  h1::after {
+    content: "CONTROL SYSTEM  /  SPIKE PRIME";
+    display: block;
+    margin-top: 9px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 2.4px;
+  }
+
+  .box {
+    position: relative;
+    display: inline-block;
+    width: min(100%, 580px);
+    margin: 10px;
+    padding: 23px;
+    vertical-align: top;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 17px;
+    background: linear-gradient(145deg, rgba(22,35,54,.96), rgba(13,22,36,.96));
+    box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,.035);
+    text-align: left;
+    backdrop-filter: blur(12px);
+  }
+
+  .box::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 22px;
+    right: 22px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), rgba(245,184,46,0));
+    opacity: .8;
+  }
+
+  .box h3 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 19px;
+    color: #f5f8ff;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+
+  .box h3::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    border-radius: 2px;
+    background: var(--accent);
+    box-shadow: 0 0 13px rgba(245,184,46,.55);
+  }
+
+  button {
+    margin: 5px;
+    padding: 12px 17px;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 10px;
+    color: #101722;
+    background: linear-gradient(135deg, var(--accent-2), var(--accent));
+    box-shadow: 0 5px 16px rgba(245,184,46,.13);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: transform .16s ease, filter .16s ease, box-shadow .16s ease;
+  }
+
+  button:hover:not(:disabled) {
+    filter: brightness(1.08);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 22px rgba(245,184,46,.2);
+  }
+
+  button:active:not(:disabled) { transform: translateY(0); }
+  button:disabled {
+    color: #718096;
+    background: #263346;
+    border-color: rgba(255,255,255,.04);
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: .7;
+  }
+
+  #disconnectBtn {
+    color: #e7edf7;
+    background: #26364c;
+    box-shadow: none;
+  }
+
+  #uploadBtn, #testBtn {
+    font-size: 12px !important;
+    padding: 11px 13px !important;
+  }
+
+  .status {
+    margin: 13px 0;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: rgba(4,10,19,.35);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .35px;
+    text-align: center;
+  }
+
+  .red { color: var(--red); }
+  .green { color: var(--green); }
+
+  small {
+    display: block;
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.65;
+  }
+
+  #log {
+    height: 145px !important;
+    margin: 15px 0 8px !important;
+    padding: 13px !important;
+    border: 1px solid rgba(56,217,150,.17);
+    border-radius: 10px !important;
+    background: #060d13 !important;
+    color: #7ce5b3 !important;
+    font: 11px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace !important;
+    box-shadow: inset 0 2px 12px rgba(0,0,0,.25);
+  }
+
+  #axesInfo {
+    min-height: 40px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: rgba(4,10,19,.35);
+    color: #8ed7ff !important;
+    overflow-wrap: anywhere;
+  }
+
+  .box:has(#vA) > div {
+    margin: 15px 0;
+    color: #dce7f7;
+    font-size: 12px;
+    font-weight: 750;
+  }
+
+  .box:has(#vA) > div span {
+    float: right;
+    color: var(--accent-2);
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .bar {
+    position: relative;
+    height: 11px;
+    margin: 9px 0 0;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,.045);
+    border-radius: 20px;
+    background: #26364a;
+  }
+
+  .bar > i {
+    top: 0;
+    bottom: 0;
+    border-radius: 20px;
+    background: linear-gradient(90deg, #d9951e, #ffdc76);
+    box-shadow: 0 0 12px rgba(245,184,46,.25);
+  }
+
+  .bar::after {
+    width: 1px;
+    background: rgba(255,255,255,.45);
+  }
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 13px 0;
+    color: #cbd8e9;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    accent-color: var(--accent);
+  }
+
+  input[type="number"] {
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    outline: none;
+    color: var(--text);
+    background: #08111e;
+    font: inherit;
+  }
+
+  input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 3px;
+  }
+
+  #limit, #dist {
+    color: var(--accent-2);
+    font-weight: 850;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #brk { font-size: 11px; font-weight: 900; }
+
+  .box:has(#limit) .status {
+    background: rgba(245,184,46,.07);
+    border-color: rgba(245,184,46,.18);
+  }
+
+  body > br { display: none; }
+
+  @media (min-width: 900px) {
+    body { text-align: center; }
+    .box { width: min(44%, 580px); min-height: 250px; }
+    .box:has(#log) { min-height: 390px; }
+    .box:has(#vA) { min-height: 390px; }
+  }
+
+  @media (max-width: 650px) {
+    body { padding: 22px 12px 32px; }
+    h1 { margin-bottom: 14px; }
+    .box {
+      display: block;
+      width: 100%;
+      margin: 10px 0;
+      padding: 19px;
+    }
+    button { max-width: 100%; }
+    #uploadBtn, #testBtn { margin-top: 8px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      scroll-behavior: auto !important;
+      transition-duration: .01ms !important;
+    }
+  }
+
+  .live-dashboard {
+    position: relative;
+    max-width: 1200px;
+    margin: 0 auto 14px;
+    padding: 17px 19px 19px;
+    border: 1px solid rgba(105,169,255,.22);
+    border-radius: 16px;
+    background: linear-gradient(110deg, rgba(17,31,50,.97), rgba(12,23,39,.96));
+    box-shadow: 0 14px 36px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.035);
+    text-align: left;
+  }
+  .live-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+  .live-kicker { color:#8ca7c8; font-size:9px; font-weight:850; letter-spacing:2px; }
+  .live-title { margin-top:3px; color:#f2f6ff; font-size:17px; font-weight:850; letter-spacing:-.3px; }
+  .live-indicator { display:flex; align-items:center; gap:7px; color:#8fa6c3; font-size:10px; font-weight:900; letter-spacing:1.4px; }
+  .live-indicator span { width:7px; height:7px; border-radius:50%; background:#38d996; box-shadow:0 0 10px rgba(56,217,150,.7); }
+  .live-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+  .live-card { min-width:0; padding:12px 13px; border:1px solid rgba(148,174,207,.13); border-radius:11px; background:rgba(4,11,21,.42); }
+  .live-label { color:#8ea2bd; font-size:9px; font-weight:850; letter-spacing:1.4px; }
+  .live-value { display:flex; align-items:baseline; gap:4px; margin:5px 0 8px; color:#f5f8ff; font:800 25px/1 ui-monospace,SFMono-Regular,Consolas,monospace; font-variant-numeric:tabular-nums; }
+  .live-value small { display:inline; margin:0; color:#8ea2bd; font:700 10px system-ui,sans-serif; }
+  .live-track,.live-center-track { position:relative; height:7px; overflow:hidden; border-radius:20px; background:#26364a; }
+  .live-track i { display:block; width:0; height:100%; border-radius:20px; background:linear-gradient(90deg,#d9951e,#ffda75); transition:width .06s linear; }
+  .live-center-track::before { content:""; position:absolute; left:50%; top:0; bottom:0; width:1px; background:rgba(255,255,255,.5); }
+  .live-center-track i { position:absolute; top:0; bottom:0; left:50%; width:0; border-radius:20px; background:#69a9ff; transition:left .06s linear,width .06s linear; }
+  .live-sub { margin-top:7px; color:#8ea2bd; font-size:10px; font-weight:650; }
+  .live-axis-row { display:flex; justify-content:space-between; gap:8px; margin-top:7px; color:#9cafc8; font-size:10px; }
+  .live-axis-row b { color:#d9e8ff; font:750 10px ui-monospace,SFMono-Regular,Consolas,monospace; }
+  @media(max-width:850px) { .live-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media(max-width:480px) { .live-dashboard { padding:14px; } .live-grid { gap:7px; } .live-card { padding:10px; } .live-value { font-size:21px; } }
 </style>
 </head>
 <body>
 <h1>Tanque LEGO SPIKE Prime (USB)</h1>
+
+<div class="live-dashboard" aria-label="Panel de conducción en directo">
+  <div class="live-head">
+    <div>
+      <div class="live-kicker">TELEMETRÍA EN DIRECTO</div>
+      <div class="live-title">Panel de conducción</div>
+    </div>
+    <div class="live-indicator"><span></span> LIVE</div>
+  </div>
+  <div class="live-grid">
+    <section class="live-card">
+      <div class="live-label">THROTTLE</div>
+      <div class="live-value"><span id="liveThrottle">0</span><small>%</small></div>
+      <div class="live-track"><i id="liveThrottleBar"></i></div>
+      <div class="live-sub" id="liveThrottleState">Neutral</div>
+    </section>
+    <section class="live-card">
+      <div class="live-label">STEERING</div>
+      <div class="live-value"><span id="liveSteer">0</span><small>%</small></div>
+      <div class="live-center-track"><i id="liveSteerBar"></i></div>
+      <div class="live-sub" id="liveSteerState">Centrado</div>
+    </section>
+    <section class="live-card">
+      <div class="live-label">TURRET</div>
+      <div class="live-value"><span id="liveTurret">0</span><small>%</small></div>
+      <div class="live-center-track"><i id="liveTurretBar"></i></div>
+      <div class="live-sub" id="liveTurretState">Centrada</div>
+    </section>
+    <section class="live-card live-inputs">
+      <div class="live-label">GAMEPAD INPUTS</div>
+      <div class="live-axis-row"><span>Stick Y</span><b id="liveAxisY">0.00</b></div>
+      <div class="live-axis-row"><span>Stick X</span><b id="liveAxisX">0.00</b></div>
+      <div class="live-axis-row"><span>Right X</span><b id="liveAxisRX">0.00</b></div>
+      <div class="live-axis-row"><span>Freno</span><b id="liveBrake">OFF</b></div>
+    </section>
+  </div>
+</div>
+
 
 <div class="box">
   <h3>Conexión del Hub</h3>
@@ -388,6 +759,25 @@ run()
       throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
       turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
     }
+
+    // Telemetría visual: refleja las entradas ya leídas, sin intervenir en el control.
+    const pct = v => Math.round(v * 100);
+    $('liveThrottle').textContent = pct(throttle);
+    $('liveThrottleBar').style.width = Math.abs(pct(throttle)) + '%';
+    $('liveThrottleState').textContent = throttle > 0.02 ? 'Adelante' : throttle < -0.02 ? 'Atrás' : 'Neutral';
+    $('liveSteer').textContent = pct(steer);
+    $('liveSteerBar').style.left = (steer >= 0 ? 50 : 50 + pct(steer) / 2) + '%';
+    $('liveSteerBar').style.width = Math.abs(pct(steer)) / 2 + '%';
+    $('liveSteerState').textContent = steer > 0.02 ? 'Derecha' : steer < -0.02 ? 'Izquierda' : 'Centrado';
+    $('liveTurret').textContent = pct(turret);
+    $('liveTurretBar').style.left = (turret >= 0 ? 50 : 50 + pct(turret) / 2) + '%';
+    $('liveTurretBar').style.width = Math.abs(pct(turret)) / 2 + '%';
+    $('liveTurretState').textContent = turret > 0.02 ? 'Derecha' : turret < -0.02 ? 'Izquierda' : 'Centrada';
+    $('liveAxisY').textContent = gp ? (gp.axes[1] || 0).toFixed(2) : '0.00';
+    $('liveAxisX').textContent = gp ? (gp.axes[0] || 0).toFixed(2) : '0.00';
+    $('liveAxisRX').textContent = gp ? (gp.axes[2] || 0).toFixed(2) : '0.00';
+    $('liveBrake').textContent = braking ? 'ON' : 'OFF';
+    $('liveBrake').style.color = braking ? 'var(--red)' : 'var(--green)';
 
     // Freno de obstáculos (solo al avanzar)
     if ($('obsStop').checked && distance !== null && distance < Number($('obsDist').value) && throttle > 0) {
