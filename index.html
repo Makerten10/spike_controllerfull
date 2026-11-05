@@ -22,7 +22,7 @@
 </head>
 <body>
 <h1>Tanque LEGO SPIKE Prime (USB)</h1>
- 
+
 <div class="box">
   <h3>Conexión del Hub</h3>
   <div style="text-align:center">
@@ -37,16 +37,16 @@
   <pre id="log" style="background:#000;color:#9f9;font-size:12px;height:120px;overflow:auto;white-space:pre-wrap;margin:8px 0;padding:6px;border-radius:6px">Registro del hub...</pre>
   <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el puerto USB solo puede usarlo una página a la vez. Usa Chrome o Edge.</small>
 </div>
- 
+
 <div class="box">
   <h3>Mando</h3>
   <div id="gpStatus" class="status red">Pulsa cualquier botón del mando</div>
   <small>Stick izquierdo: conducir · Stick derecho (horizontal): torreta</small>
   <div id="axesInfo" style="font-family:monospace;font-size:12px;color:#9f9;margin-top:8px;text-align:center"></div>
 </div>
- 
+
 <br>
- 
+
 <div class="box">
   <h3>Motores</h3>
   <div>A (izq.) <span id="vA">0</span><div class="bar"><i id="bA"></i></div></div>
@@ -55,7 +55,7 @@
   <div>D (der.) <span id="vD">0</span><div class="bar"><i id="bD"></i></div></div>
   <div>E (torreta) <span id="vE">0</span><div class="bar"><i id="bE"></i></div></div>
 </div>
- 
+
 <div class="box">
   <h3>Ajustes y sensor</h3>
   <label><input type="checkbox" id="invL"> Invertir motores izquierdos (A, B)</label>
@@ -63,22 +63,24 @@
   <label><input type="checkbox" id="invE"> Invertir torreta (E)</label>
   <label><input type="checkbox" id="obsStop"> Frenar al avanzar si hay obstáculo a menos de
     <input type="number" id="obsDist" value="10" min="3" max="100" style="width:60px"> cm</label>
+  <div class="status">Límite de velocidad: <span id="limit">50</span>% <span id="brk" style="color:#ff4444"></span></div>
+  <small>D-Pad ↑/↓: ±5% · A: 20% · X: 50% · Y: 100% · B (mantener): freno</small>
   <div class="status">Distancia (F): <span id="dist">—</span></div>
 </div>
- 
+
 <script>
   let port = null, writer = null, reader = null;
   let connected = false, sending = false;
   let lastKey = "", lastSend = 0;
   let distance = null;
- 
+
   const $ = id => document.getElementById(id);
- 
+
   function setHub(text, ok) {
     $('hubStatus').textContent = text;
     $('hubStatus').className = 'status ' + (ok ? 'green' : 'red');
   }
- 
+
   // ---------- Conexión ----------
   $('connectBtn').addEventListener('click', async () => {
     if (!('serial' in navigator)) {
@@ -103,9 +105,9 @@
             "\n\n¿Está abierta la web oficial de LEGO con el hub conectado? Ciérrala o desconecta el hub allí.");
     }
   });
- 
+
   $('disconnectBtn').addEventListener('click', disconnect);
- 
+
   async function disconnect() {
     if (!connected) return;
     try { await send({ cmd: "stop" }, true); } catch (e) {}
@@ -123,7 +125,7 @@
     $('connectBtn').disabled = false;
     $('disconnectBtn').disabled = true;
   }
- 
+
   // ---------- Lectura del hub (sensor de distancia) ----------
   async function readLoop() {
     const dec = new TextDecoder();
@@ -150,7 +152,7 @@
     }
     if (connected) disconnect();
   }
- 
+
   function handleLine(line) {
     if (!line) return;
     let txt = line;
@@ -169,7 +171,7 @@
       }
     } catch (e) {}
   }
- 
+
   // ---------- Envío ----------
   async function send(obj, force = false) {
     if (!connected || !writer) return;
@@ -183,7 +185,7 @@
       sending = false;
     }
   }
- 
+
   // ---------- Registro, subida del bridge y prueba ----------
   let uploading = false;
   const logEl = $('log');
@@ -194,13 +196,13 @@
     logEl.textContent = logLines.join("\n");
     logEl.scrollTop = logEl.scrollHeight;
   }
- 
+
   async function rawWrite(bytes) {
     if (!writer) return;
     await writer.write(bytes);
   }
   const sleep = ms => new Promise(r => setTimeout(r, ms));
- 
+
   const BRIDGE = `import json
 import sys
 import uselect
@@ -208,19 +210,19 @@ import utime
 import motor
 import distance_sensor
 from hub import port
- 
+
 MOTORS = {"A": port.A, "B": port.B, "C": port.C, "D": port.D, "E": port.E}
 DIST_PORT = port.F
 SPEED_SCALE = 10
 WATCHDOG_MS = 600
 DIST_EVERY_MS = 200
- 
+
 poll = uselect.poll()
 poll.register(sys.stdin, uselect.POLLIN)
 last_cmd = utime.ticks_ms()
 last_dist = utime.ticks_ms()
 stopped = False
- 
+
 def set_speed(name, spd):
     try:
         p = MOTORS[name]
@@ -230,11 +232,11 @@ def set_speed(name, spd):
             motor.run(p, int(spd) * SPEED_SCALE)
     except Exception as e:
         print(json.dumps({"err": name + ": " + str(e)}))
- 
+
 def stop_all():
     for n in MOTORS:
         set_speed(n, 0)
- 
+
 def read_distance():
     try:
         d = distance_sensor.distance(DIST_PORT)
@@ -243,7 +245,7 @@ def read_distance():
     except Exception:
         pass
     return None
- 
+
 def handle(req):
     cmd = req.get("cmd")
     if cmd == "motors":
@@ -254,7 +256,7 @@ def handle(req):
         set_speed(req.get("port"), req.get("speed", 0))
     elif cmd == "stop":
         stop_all()
- 
+
 def run():
     global last_cmd, last_dist, stopped
     print(json.dumps({"ready": 1}))
@@ -275,10 +277,10 @@ def run():
         if utime.ticks_diff(now, last_dist) > DIST_EVERY_MS:
             last_dist = now
             print(json.dumps({"dist": read_distance()}))
- 
+
 run()
 `;
- 
+
   $('uploadBtn').addEventListener('click', async () => {
     if (!connected) return;
     uploading = true;
@@ -305,7 +307,7 @@ run()
       $('uploadBtn').disabled = false;
     }
   });
- 
+
   $('testBtn').addEventListener('click', async () => {
     if (!connected) return;
     log("— Prueba: motor A 40% durante 1 s —");
@@ -315,7 +317,7 @@ run()
     await send({ cmd: "stop" }, true);
     uploading = false;
   });
- 
+
   // ---------- Mando ----------
   window.addEventListener("gamepadconnected", e => {
     $('gpStatus').textContent = "Conectado: " + e.gamepad.id;
@@ -325,9 +327,11 @@ run()
     $('gpStatus').textContent = "Mando desconectado";
     $('gpStatus').className = 'status red';
   });
- 
+
   let padBlocked = false;
   let lastPadId = "";
+  let maxPct = 50;        // límite de velocidad (%)
+  const prevBtn = {};     // estado previo de botones, para detectar pulsaciones
   function getPad() {
     if (padBlocked) return null;
     try {
@@ -340,22 +344,22 @@ run()
     }
     return null;
   }
- 
+
   if (window.self !== window.top) {
     $('gpStatus').textContent = "Estás en un iframe: el mando y el USB están bloqueados. Descarga el archivo y ábrelo directamente en Chrome/Edge.";
     $('gpStatus').className = 'status red';
   }
- 
+
   const dz = v => Math.abs(v) < 0.12 ? 0 : v;
   const clamp = v => Math.max(-100, Math.min(100, Math.round(v)));
- 
+
   function showMotor(k, v) {
     $('v' + k).textContent = v;
     const b = $('b' + k);
     b.style.left = (v >= 0 ? 50 : 50 + v / 2) + "%";
     b.style.width = Math.abs(v) / 2 + "%";
   }
- 
+
   setInterval(() => {
     const gp = getPad();
     if (gp && gp.id !== lastPadId) {
@@ -366,30 +370,42 @@ run()
     if (gp) {
       $('axesInfo').textContent = "Ejes: " + Array.from(gp.axes, a => a.toFixed(2)).join(" · ");
     }
+    const btn = i => !!(gp && gp.buttons[i] && gp.buttons[i].pressed);
+    const edge = i => { const n = btn(i), w = !!prevBtn[i]; prevBtn[i] = n; return n && !w; };
+    if (edge(12)) maxPct = Math.min(100, maxPct + 5);  // D-Pad arriba
+    if (edge(13)) maxPct = Math.max(0, maxPct - 5);    // D-Pad abajo
+    if (edge(0)) maxPct = 20;                          // A
+    if (edge(2)) maxPct = 50;                          // X
+    if (edge(3)) maxPct = 100;                         // Y
+    const braking = btn(1);                            // B: freno mientras se mantiene
+    $('limit').textContent = maxPct;
+    $('brk').textContent = braking ? "· FRENO" : "";
+
     let throttle = 0, steer = 0, turret = 0;
- 
+
     if (gp) {
       steer    = dz(gp.axes[0] || 0);     // stick izq. horizontal
       throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
       turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
     }
- 
+
     // Freno de obstáculos (solo al avanzar)
     if ($('obsStop').checked && distance !== null && distance < Number($('obsDist').value) && throttle > 0) {
       throttle = 0;
     }
- 
+
     // Mezcla tipo tanque
     let left = throttle + steer;
     let right = throttle - steer;
     const m = Math.max(1, Math.abs(left), Math.abs(right));
-    left = left / m * 100;
-    right = right / m * 100;
- 
+    const k = maxPct / 100;
+    left = braking ? 0 : left / m * 100 * k;
+    right = braking ? 0 : right / m * 100 * k;
+
     const sL = $('invL').checked ? -1 : 1;
     const sR = $('invR').checked ? -1 : 1;
     const sE = $('invE').checked ? -1 : 1;
- 
+
     const motors = {
       A: clamp(left * sL),
       B: clamp(left * sL),
@@ -397,9 +413,9 @@ run()
       D: clamp(right * sR),
       E: clamp(turret * 60 * sE)
     };
- 
+
     for (const k of Object.keys(motors)) showMotor(k, motors[k]);
- 
+
     const msg = { cmd: "motors", ...motors };
     const key = JSON.stringify(motors);
     const now = performance.now();
@@ -410,7 +426,7 @@ run()
       send(msg);
     }
   }, 50);
- 
+
   // Frenar si se cierra la pestaña
   window.addEventListener("beforeunload", () => {
     if (connected && writer) {
@@ -420,4 +436,3 @@ run()
 </script>
 </body>
 </html>
- 
