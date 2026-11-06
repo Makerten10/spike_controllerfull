@@ -447,6 +447,8 @@
   let lastKey = "", lastSend = 0;
   let distance = null;
   let transport = null; // 'usb' | 'ble'
+  // En BLE no mandar motores hasta que el bridge esté corriendo (si no, el hub puede reiniciarse)
+  let bridgeReady = false;
 
   const $ = id => document.getElementById(id);
 
@@ -467,6 +469,7 @@
       writer = port.writable.getWriter();
       connected = true;
       transport = 'usb';
+      bridgeReady = false;
       setHub("¡Conectado por USB!", true);
       $('connectBtn').disabled = true;
       $('connectBleBtn').disabled = true;
@@ -497,6 +500,7 @@
     try { await port.close(); } catch (e) {}
     port = writer = reader = null;
     distance = null;
+    bridgeReady = false;
     $('dist').textContent = "—";
     setHub("Desconectado", false);
     $('connectBtn').disabled = false;
@@ -552,12 +556,21 @@
       } else {
         log(txt.slice(a, b + 1));
       }
+      // Bridge listo: a partir de aquí se pueden mandar motores por BLE sin tumbar el hub
+      if (msg.ready === 1 || msg.ready === true) {
+        bridgeReady = true;
+        log("— Bridge listo: ya se pueden enviar órdenes de motores. —");
+      }
     } catch (e) {}
   }
 
   // ---------- Envío ----------
   async function send(obj, force = false) {
-    if (transport === 'ble') return bleSendJSON(obj, force);
+    // Por BLE solo enviar motores cuando el bridge está corriendo (evita reinicio del hub)
+    if (transport === 'ble') {
+      if (!bridgeReady && !force) return;
+      return bleSendJSON(obj, force);
+    }
     if (!connected || !writer) return;
     if (sending && !force) return; // evita acumular mensajes
     sending = true;
@@ -842,25 +855,36 @@ run()
   }
 
   // Envío de mensajes (se trocean según el tamaño máximo de paquete del hub)
+  // Pausas pequeñas entre paquetes para evitar que Web Bluetooth / el hub corten la conexión
   async function bleWriteFrame(frame) {
-    let size = Math.max(20, bleInfo.maxPacket || 20);
+    let size = Math.min(Math.max(20, bleInfo.maxPacket || 20), 23);
     for (let i = 0; i < frame.length; ) {
       try {
         await bleRx.writeValueWithoutResponse(frame.slice(i, i + size));
         i += size;
+        if (i < frame.length) await sleep(8);
       } catch (e) {
-        if (size > 20) { size = 20; bleInfo.maxPacket = 20; } else throw e;
+        if (size > 20) {
+          size = 20;
+          bleInfo.maxPacket = 20;
+          log("BLE: reduciendo tamaño de paquete a 20 B");
+        } else {
+          throw e;
+        }
       }
     }
   }
 
   function bleSendMessage(bytes) {
     const frame = cobsPack(bytes);
-    bleChain = bleChain.then(() => bleWriteFrame(frame)).catch(e => log("BLE: " + e));
+    bleChain = bleChain.then(() => bleWriteFrame(frame)).catch(e => {
+      log("BLE write: " + e);
+      throw e;
+    });
     return bleChain;
   }
 
-  function bleRequest(bytes, expectType, timeout = 6000) {
+  function bleRequest(bytes, expectType, timeout = 8000) {
     return new Promise((resolve, reject) => {
       const w = { type: expectType, resolve };
       w.timer = setTimeout(() => {
@@ -868,7 +892,11 @@ run()
         reject(new Error("sin respuesta del hub (0x" + expectType.toString(16) + ")"));
       }, timeout);
       bleWaiters.push(w);
-      bleSendMessage(bytes);
+      bleSendMessage(bytes).catch(err => {
+        bleWaiters = bleWaiters.filter(x => x !== w);
+        clearTimeout(w.timer);
+        reject(err);
+      });
     });
   }
 
@@ -928,31 +956,72 @@ run()
     }
   }
 
-  // Conexión
+  // Conexión DIAGNÓSTICA: cada paso lento y numerado para ver CUÁNDO se apaga el hub
   $('connectBleBtn').addEventListener('click', async () => {
     if (!navigator.bluetooth) {
       alert("Este navegador no soporta Web Bluetooth. Usa Chrome o Edge (Windows, Mac, Android o ChromeOS).");
       return;
     }
     try {
+      log("— 1) Elige el hub en el diálogo del navegador... —");
       bleDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [BLE_SERVICE] }] });
       bleDevice.addEventListener('gattserverdisconnected', onBleDisconnected);
-      log("— Conectando por Bluetooth... —");
+      log("— 2) Elegido: " + (bleDevice.name || "(sin nombre)") + " — Mira el hub: ¿sigue encendido? (2 s) —");
+      await sleep(2000);
+
+      log("— 3) Conectando GATT... —");
       const server = await bleDevice.gatt.connect();
+      log("— 4) GATT OK. ¿Sigue encendido el hub? (3 s) —");
+      await sleep(3000);
+      if (!bleDevice.gatt.connected) throw new Error("GATT se cortó solo tras conectar");
+
+      log("— 5) Obteniendo servicio FD02... —");
       const service = await server.getPrimaryService(BLE_SERVICE);
+      log("— 6) Servicio OK. ¿Sigue encendido? (2 s) —");
+      await sleep(2000);
+
+      log("— 7) Características RX/TX... —");
       bleRx = await service.getCharacteristic(BLE_RX);
+      await sleep(300);
       bleTx = await service.getCharacteristic(BLE_TX);
+      log("— 8) Características OK. ¿Sigue encendido? (2 s) —");
+      await sleep(2000);
+
+      log("— 9) Activando notificaciones TX (a menudo es el paso crítico)... —");
       bleTx.addEventListener('characteristicvaluechanged', onBleNotify);
       await bleTx.startNotifications();
+      log("— 10) Notificaciones ON. ¿Sigue encendido? (3 s) —");
+      await sleep(3000);
+      if (!bleDevice.gatt.connected) throw new Error("GATT se cortó tras startNotifications");
 
       transport = 'ble';
       connected = true;
+      bridgeReady = false; // no mandar motores hasta {"ready":1}
       bleRxBuf = [];
+      bleChain = Promise.resolve();
+      bleWaiters = [];
 
-      const r = await bleRequest(new Uint8Array([0x00]), 0x01);   // InfoRequest -> InfoResponse
+      log("— 11) Handshake InfoRequest... —");
+      let r = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          r = await bleRequest(new Uint8Array([0x00]), 0x01, 6000);
+          break;
+        } catch (e) {
+          log("— Handshake intento " + attempt + " falló: " + e + " —");
+          if (attempt === 3) throw e;
+          await sleep(600);
+        }
+      }
+
       const dv = new DataView(r.buffer, r.byteOffset, r.byteLength);
-      bleInfo = { maxPacket: dv.getUint16(9, true), maxChunk: dv.getUint16(13, true) };
-      log("— Hub conectado. Paquete máx.: " + bleInfo.maxPacket + " B, trozo máx.: " + bleInfo.maxChunk + " B —");
+      const rawPacket = dv.getUint16(9, true) || 20;
+      const rawChunk  = dv.getUint16(13, true) || 512;
+      bleInfo = {
+        maxPacket: Math.min(rawPacket, 23),
+        maxChunk:  Math.min(rawChunk, 256)
+      };
+      log("— 12) Handshake OK. Paquete " + bleInfo.maxPacket + " B — Hub conectado sin apagarse. —");
 
       setHub("¡Conectado por Bluetooth!", true);
       $('connectBtn').disabled = true;
@@ -963,21 +1032,38 @@ run()
       log("Pulsa «1) Subir y ejecutar bridge».");
       lastKey = "";
     } catch (err) {
+      log("— ERROR BLE: " + err + " —");
+      log("— El ÚLTIMO paso numerado que viste es donde se apagó el hub. Dime ese número. —");
       try { if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect(); } catch (e) {}
       bleCleanup();
-      alert("Error al conectar por Bluetooth: " + err +
-            "\n\nComprueba que el hub está encendido, con Bluetooth activo y que no está conectado a la app oficial de LEGO ni a otro dispositivo.");
+      alert("Error BLE: " + err + "\n\nMira el log: el último paso numerado indica cuándo se apagó. Dime ese número.");
     }
   });
 
-  // Subida del bridge al slot 0 y ejecución
+  // Subida del bridge al slot 0 y ejecución (versión robusta)
   async function bleUploadAndRun() {
     const code = BRIDGE.replace("USE_STDIN = True", "USE_STDIN = False");
     const program = new TextEncoder().encode(code);
 
-    log("— BLE: limpiando slot " + BRIDGE_SLOT + " —");
-    await bleRequest(new Uint8Array([0x46, BRIDGE_SLOT]), 0x47);
+    // 1) Detener programa en ejecución
+    log("— BLE: deteniendo programa actual... —");
+    try {
+      await bleRequest(new Uint8Array([0x1E, 0x01, BRIDGE_SLOT]), 0x1F, 3000);
+      await sleep(150);
+    } catch (e) {
+      log("— (no había programa en ejecución o timeout, continuamos) —");
+    }
 
+    // 2) Limpiar slot
+    log("— BLE: limpiando slot " + BRIDGE_SLOT + " —");
+    try {
+      await bleRequest(new Uint8Array([0x46, BRIDGE_SLOT]), 0x47);
+    } catch (e) {
+      log("— Clear slot: " + e + " (continuamos) —");
+    }
+    await sleep(100);
+
+    // 3) Iniciar transferencia
     const name = new TextEncoder().encode("program.py");
     const start = new Uint8Array(1 + name.length + 1 + 1 + 4);
     start[0] = 0x0C;
@@ -985,12 +1071,19 @@ run()
     start[1 + name.length] = 0;
     start[2 + name.length] = BRIDGE_SLOT;
     new DataView(start.buffer).setUint32(3 + name.length, crcPadded(program), true);
-    const sr = await bleRequest(start, 0x0D);
-    if (sr[1] !== 0) throw new Error("el hub rechazó la subida del archivo");
 
-    const chunkSize = Math.max(4, Math.floor((bleInfo.maxChunk || 512) / 4) * 4);
+    log("— BLE: iniciando subida (" + program.length + " B)... —");
+    const sr = await bleRequest(start, 0x0D);
+    if (sr[1] !== 0) throw new Error("el hub rechazó la subida del archivo (status " + sr[1] + ")");
+
+    // 4) Trozo a trozo con pausas
+    const maxChunk = Math.min(bleInfo.maxChunk || 512, 256);
+    const chunkSize = Math.max(4, Math.floor(maxChunk / 4) * 4);
     let running = 0;
-    for (let i = 0; i < program.length; i += chunkSize) {
+    let sent = 0;
+    const total = program.length;
+
+    for (let i = 0; i < total; i += chunkSize) {
       const part = program.slice(i, i + chunkSize);
       running = crcPadded(part, running);
       const m = new Uint8Array(1 + 4 + 2 + part.length);
@@ -999,13 +1092,22 @@ run()
       dv.setUint32(1, running, true);
       dv.setUint16(5, part.length, true);
       m.set(part, 7);
+
       const cr = await bleRequest(m, 0x11);
-      if (cr[1] !== 0) throw new Error("el hub rechazó un trozo del archivo");
+      if (cr[1] !== 0) throw new Error("el hub rechazó un trozo (offset " + i + ")");
+
+      sent += part.length;
+      if (sent === total || Math.floor((sent / total) * 4) > Math.floor(((sent - part.length) / total) * 4)) {
+        log("— BLE: subido " + Math.round((sent / total) * 100) + "% (" + sent + "/" + total + " B) —");
+      }
+      await sleep(35);
     }
-    log("— BLE: programa subido (" + program.length + " B). Iniciando... —");
+
+    log("— BLE: programa subido (" + total + " B). Iniciando... —");
+    await sleep(100);
     const pr = await bleRequest(new Uint8Array([0x1E, 0x00, BRIDGE_SLOT]), 0x1F);
-    if (pr[1] !== 0) throw new Error("el hub no pudo iniciar el programa");
-    log("— Bridge iniciado. Espera a ver ready y la distancia. —");
+    if (pr[1] !== 0) throw new Error("el hub no pudo iniciar el programa (status " + pr[1] + ")");
+    log("— Bridge iniciado. Espera a ver {\"ready\": 1} y la distancia. —");
   }
 
   // Desconexión
@@ -1028,6 +1130,7 @@ run()
   function bleCleanup() {
     connected = false;
     transport = null;
+    bridgeReady = false;
     uploading = false;
     bleRx = bleTx = null;
     bleRxBuf = [];
