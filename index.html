@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LEGO SPIKE Tanque USB</title>
+<title>LEGO SPIKE Tanque USB / Bluetooth</title>
 <style>
   :root {
     color-scheme: dark;
@@ -351,10 +351,11 @@
   .live-axis-row b { color:#d9e8ff; font:750 10px ui-monospace,SFMono-Regular,Consolas,monospace; }
   @media(max-width:850px) { .live-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
   @media(max-width:480px) { .live-dashboard { padding:14px; } .live-grid { gap:7px; } .live-card { padding:10px; } .live-value { font-size:21px; } }
+
 </style>
 </head>
 <body>
-<h1>Tanque LEGO SPIKE Prime (USB)</h1>
+<h1>Tanque LEGO SPIKE Prime (USB / Bluetooth)</h1>
 
 <div class="live-dashboard" aria-label="Panel de conducción en directo">
   <div class="live-head">
@@ -398,6 +399,7 @@
   <h3>Conexión del Hub</h3>
   <div style="text-align:center">
     <button id="connectBtn">Conectar Hub (USB)</button>
+    <button id="connectBleBtn">Conectar Hub (Bluetooth)</button>
     <button id="disconnectBtn" disabled>Desconectar</button>
   </div>
   <div id="hubStatus" class="status red">Desconectado</div>
@@ -406,7 +408,7 @@
     <button id="testBtn" disabled style="font-size:15px;padding:10px 16px">2) Probar motor A</button>
   </div>
   <pre id="log" style="background:#000;color:#9f9;font-size:12px;height:120px;overflow:auto;white-space:pre-wrap;margin:8px 0;padding:6px;border-radius:6px">Registro del hub...</pre>
-  <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el puerto USB solo puede usarlo una página a la vez. Usa Chrome o Edge.</small>
+  <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el USB y el Bluetooth del hub solo admiten una conexión a la vez. Usa Chrome o Edge. Para Bluetooth, enciende el hub y elige su nombre en la lista; después pulsa «1) Subir y ejecutar bridge».</small>
 </div>
 
 <div class="box">
@@ -444,6 +446,7 @@
   let connected = false, sending = false;
   let lastKey = "", lastSend = 0;
   let distance = null;
+  let transport = null; // 'usb' | 'ble'
 
   const $ = id => document.getElementById(id);
 
@@ -463,8 +466,10 @@
       await port.open({ baudRate: 115200 });
       writer = port.writable.getWriter();
       connected = true;
+      transport = 'usb';
       setHub("¡Conectado por USB!", true);
       $('connectBtn').disabled = true;
+      $('connectBleBtn').disabled = true;
       $('disconnectBtn').disabled = false;
       $('uploadBtn').disabled = false;
       $('testBtn').disabled = false;
@@ -481,6 +486,7 @@
 
   async function disconnect() {
     if (!connected) return;
+    if (transport === 'ble') return bleDisconnect();
     try { await send({ cmd: "stop" }, true); } catch (e) {}
     try { await rawWrite(new Uint8Array([3, 3])); } catch (e) {} // Ctrl+C: detiene el bridge
     connected = false;
@@ -494,7 +500,9 @@
     $('dist').textContent = "—";
     setHub("Desconectado", false);
     $('connectBtn').disabled = false;
+    $('connectBleBtn').disabled = false;
     $('disconnectBtn').disabled = true;
+    transport = null;
   }
 
   // ---------- Lectura del hub (sensor de distancia) ----------
@@ -524,27 +532,32 @@
     if (connected) disconnect();
   }
 
-  function handleLine(line) {
+  function handleLine(line) {   // USB: la salida del hub llega cifrada con XOR 3
     if (!line) return;
     let txt = line;
-    // El hub envía su salida cifrada con XOR 3: se descifra si no hay llaves a la vista
     if (!txt.includes("{")) {
       txt = Array.from(line, c => String.fromCharCode(c.charCodeAt(0) ^ 3)).join("");
     }
+    handleText(txt);
+  }
+
+  function handleText(txt) {     // texto ya descifrado (USB y Bluetooth)
     const a = txt.indexOf("{"), b = txt.lastIndexOf("}");
-    if (a < 0 || b < a) { log(txt); return; }
+    if (a < 0 || b < a) { if (txt.trim()) log(txt.trim()); return; }
     try {
       const msg = JSON.parse(txt.slice(a, b + 1));
-      if (!("dist" in msg)) log(txt.slice(a, b + 1));
       if ("dist" in msg) {
         distance = msg.dist;
         $('dist').textContent = (distance === null) ? "sin lectura" : distance + " cm";
+      } else {
+        log(txt.slice(a, b + 1));
       }
     } catch (e) {}
   }
 
   // ---------- Envío ----------
   async function send(obj, force = false) {
+    if (transport === 'ble') return bleSendJSON(obj, force);
     if (!connected || !writer) return;
     if (sending && !force) return; // evita acumular mensajes
     sending = true;
@@ -580,7 +593,11 @@ import uselect
 import utime
 import motor
 import distance_sensor
+import hub
 from hub import port
+
+# La pagina pone USE_STDIN = False cuando sube el bridge por Bluetooth
+USE_STDIN = True
 
 MOTORS = {"A": port.A, "B": port.B, "C": port.C, "D": port.D, "E": port.E}
 DIST_PORT = port.F
@@ -588,11 +605,36 @@ SPEED_SCALE = 10
 WATCHDOG_MS = 600
 DIST_EVERY_MS = 200
 
-poll = uselect.poll()
-poll.register(sys.stdin, uselect.POLLIN)
+# Canal "tunnel": mensajes de la pagina por Bluetooth
+tunnel = None
+try:
+    tunnel = hub.config["module_tunnel"]
+except Exception:
+    tunnel = None
+
+# Canal USB: lineas JSON por stdin
+poll = None
+if USE_STDIN:
+    try:
+        poll = uselect.poll()
+        poll.register(sys.stdin, uselect.POLLIN)
+    except Exception:
+        poll = None
+
 last_cmd = utime.ticks_ms()
 last_dist = utime.ticks_ms()
 stopped = False
+via_tunnel = False
+
+def emit(obj):
+    s = json.dumps(obj)
+    if via_tunnel and tunnel is not None:
+        try:
+            tunnel.send(s.encode())
+            return
+        except Exception:
+            pass
+    print(s)
 
 def set_speed(name, spd):
     try:
@@ -602,7 +644,7 @@ def set_speed(name, spd):
         else:
             motor.run(p, int(spd) * SPEED_SCALE)
     except Exception as e:
-        print(json.dumps({"err": name + ": " + str(e)}))
+        emit({"err": name + ": " + str(e)})
 
 def stop_all():
     for n in MOTORS:
@@ -628,26 +670,44 @@ def handle(req):
     elif cmd == "stop":
         stop_all()
 
+def on_tunnel(data):
+    global last_cmd, stopped, via_tunnel
+    via_tunnel = True
+    try:
+        handle(json.loads(bytes(data).decode()))
+        last_cmd = utime.ticks_ms()
+        stopped = False
+    except Exception as e:
+        emit({"err": str(e)})
+
 def run():
     global last_cmd, last_dist, stopped
+    if tunnel is not None:
+        try:
+            tunnel.callback(on_tunnel)
+        except Exception as e:
+            print(json.dumps({"err": "tunnel: " + str(e)}))
     print(json.dumps({"ready": 1}))
     while True:
         now = utime.ticks_ms()
-        if poll.poll(10):
-            line = sys.stdin.readline()
-            if line:
-                try:
-                    handle(json.loads(line.strip()))
-                    last_cmd = now
-                    stopped = False
-                except Exception as e:
-                    print(json.dumps({"err": str(e)}))
+        if poll is not None and not via_tunnel:
+            if poll.poll(10):
+                line = sys.stdin.readline()
+                if line:
+                    try:
+                        handle(json.loads(line.strip()))
+                        last_cmd = now
+                        stopped = False
+                    except Exception as e:
+                        emit({"err": str(e)})
+        else:
+            utime.sleep_ms(10)
         if utime.ticks_diff(now, last_cmd) > WATCHDOG_MS and not stopped:
             stop_all()
             stopped = True
         if utime.ticks_diff(now, last_dist) > DIST_EVERY_MS:
             last_dist = now
-            print(json.dumps({"dist": read_distance()}))
+            emit({"dist": read_distance()})
 
 run()
 `;
@@ -657,6 +717,7 @@ run()
     uploading = true;
     $('uploadBtn').disabled = true;
     try {
+      if (transport === 'ble') { await bleUploadAndRun(); lastKey = ""; return; }
       log("— Interrumpiendo programa del hub (Ctrl+C)...");
       await rawWrite(new Uint8Array([3, 3]));
       await sleep(400);
@@ -688,6 +749,301 @@ run()
     await send({ cmd: "stop" }, true);
     uploading = false;
   });
+
+  // ---------- Bluetooth (protocolo SPIKE App 3, servicio GATT FD02) ----------
+  const BLE_SERVICE = "0000fd02-0000-1000-8000-00805f9b34fb";
+  const BLE_RX = "0000fd02-0001-1000-8000-00805f9b34fb"; // escritura hacia el hub
+  const BLE_TX = "0000fd02-0002-1000-8000-00805f9b34fb"; // notificaciones desde el hub
+  const COBS_DELIM = 0x02, COBS_NONE = 0xFF, COBS_MAX = 84, COBS_OFF = 2, COBS_XOR = 3;
+  const BRIDGE_SLOT = 0;
+
+  let bleDevice = null, bleRx = null, bleTx = null;
+  let bleInfo = { maxPacket: 20, maxChunk: 512 };
+  let bleRxBuf = [];
+  let bleWaiters = [];
+  let bleBusy = false;
+  let bleChain = Promise.resolve();
+
+  // COBS modificado de SPIKE (escapa 0x00, 0x01 y 0x02)
+  function cobsEncode(data) {
+    const buf = [];
+    let codeIndex = 0, block = 0;
+    const begin = () => { codeIndex = buf.length; buf.push(COBS_NONE); block = 1; };
+    begin();
+    for (const byte of data) {
+      if (byte > COBS_DELIM) { buf.push(byte); block++; }
+      if (byte <= COBS_DELIM || block > COBS_MAX) {
+        if (byte <= COBS_DELIM) buf[codeIndex] = byte * COBS_MAX + block + COBS_OFF;
+        begin();
+      }
+    }
+    buf[codeIndex] = block + COBS_OFF;
+    return buf;
+  }
+
+  function cobsDecode(data) {
+    const out = [];
+    if (!data.length) return Uint8Array.from(out);
+    const unescape = code => {
+      if (code === 0xFF) return [null, COBS_MAX + 1];
+      let value = Math.floor((code - COBS_OFF) / COBS_MAX);
+      let block = (code - COBS_OFF) % COBS_MAX;
+      if (block === 0) { block = COBS_MAX; value -= 1; }
+      return [value, block];
+    };
+    let [value, block] = unescape(data[0]);
+    for (let i = 1; i < data.length; i++) {
+      const byte = data[i];
+      block--;
+      if (block > 0) { out.push(byte); continue; }
+      if (value !== null) out.push(value);
+      [value, block] = unescape(byte);
+    }
+    return Uint8Array.from(out);
+  }
+
+  function cobsPack(data) {
+    const enc = cobsEncode(data);
+    const out = new Uint8Array(enc.length + 1);
+    for (let i = 0; i < enc.length; i++) out[i] = enc[i] ^ COBS_XOR;
+    out[enc.length] = COBS_DELIM;
+    return out;
+  }
+
+  function cobsUnpack(frame) {
+    return cobsDecode(Uint8Array.from(frame, b => b ^ COBS_XOR));
+  }
+
+  // CRC32 (el hub exige datos rellenados con ceros a múltiplo de 4)
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+
+  function crc32(bytes, seed = 0) {
+    let c = (seed ^ 0xFFFFFFFF) >>> 0;
+    for (const b of bytes) c = (CRC_TABLE[(c ^ b) & 0xFF] ^ (c >>> 8)) >>> 0;
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function crcPadded(bytes, seed = 0) {
+    const pad = (4 - (bytes.length % 4)) % 4;
+    if (pad) {
+      const p = new Uint8Array(bytes.length + pad);
+      p.set(bytes);
+      bytes = p;
+    }
+    return crc32(bytes, seed);
+  }
+
+  // Envío de mensajes (se trocean según el tamaño máximo de paquete del hub)
+  async function bleWriteFrame(frame) {
+    let size = Math.max(20, bleInfo.maxPacket || 20);
+    for (let i = 0; i < frame.length; ) {
+      try {
+        await bleRx.writeValueWithoutResponse(frame.slice(i, i + size));
+        i += size;
+      } catch (e) {
+        if (size > 20) { size = 20; bleInfo.maxPacket = 20; } else throw e;
+      }
+    }
+  }
+
+  function bleSendMessage(bytes) {
+    const frame = cobsPack(bytes);
+    bleChain = bleChain.then(() => bleWriteFrame(frame)).catch(e => log("BLE: " + e));
+    return bleChain;
+  }
+
+  function bleRequest(bytes, expectType, timeout = 6000) {
+    return new Promise((resolve, reject) => {
+      const w = { type: expectType, resolve };
+      w.timer = setTimeout(() => {
+        bleWaiters = bleWaiters.filter(x => x !== w);
+        reject(new Error("sin respuesta del hub (0x" + expectType.toString(16) + ")"));
+      }, timeout);
+      bleWaiters.push(w);
+      bleSendMessage(bytes);
+    });
+  }
+
+  // Comandos del mando: mensaje TunnelMessage (0x32) con el mismo JSON que usa el bridge por USB
+  async function bleSendJSON(obj, force = false) {
+    if (!connected || !bleRx) return;
+    if (bleBusy && !force) return;
+    bleBusy = true;
+    try {
+      const p = new TextEncoder().encode(JSON.stringify(obj));
+      const msg = new Uint8Array(3 + p.length);
+      msg[0] = 0x32;
+      msg[1] = p.length & 0xFF;
+      msg[2] = p.length >> 8;
+      msg.set(p, 3);
+      await bleSendMessage(msg);
+    } finally {
+      bleBusy = false;
+    }
+  }
+
+  // Recepción
+  function onBleNotify(ev) {
+    const dv = ev.target.value;
+    const v = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    for (const b of v) {
+      if (b === COBS_DELIM) {
+        if (bleRxBuf.length) {
+          try { bleOnMessage(cobsUnpack(bleRxBuf)); } catch (e) { log("decodificación: " + e); }
+        }
+        bleRxBuf = [];
+      } else if (b === 0x01 && bleRxBuf.length === 0) {
+        // marca de mensaje de alta prioridad: se ignora
+      } else {
+        bleRxBuf.push(b);
+      }
+    }
+  }
+
+  function bleOnMessage(msg) {
+    if (!msg.length) return;
+    const i = bleWaiters.findIndex(w => w.type === msg[0]);
+    if (i >= 0) {
+      const [w] = bleWaiters.splice(i, 1);
+      clearTimeout(w.timer);
+      w.resolve(msg);
+      return;
+    }
+    const dec = new TextDecoder();
+    if (msg[0] === 0x21) {                       // salida de consola (print) del programa
+      dec.decode(msg.slice(1)).replace(/\0/g, "").split(/\r?\n/).forEach(l => handleText(l));
+    } else if (msg[0] === 0x32 || msg[0] === 0x33) {   // mensaje del bridge por el túnel
+      const size = msg[1] | (msg[2] << 8);
+      handleText(dec.decode(msg.slice(3, 3 + size)));
+    } else if (msg[0] === 0x20) {
+      log("— Programa " + (msg[1] === 0 ? "iniciado" : "detenido") + " en el hub —");
+    }
+  }
+
+  // Conexión
+  $('connectBleBtn').addEventListener('click', async () => {
+    if (!navigator.bluetooth) {
+      alert("Este navegador no soporta Web Bluetooth. Usa Chrome o Edge (Windows, Mac, Android o ChromeOS).");
+      return;
+    }
+    try {
+      bleDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [BLE_SERVICE] }] });
+      bleDevice.addEventListener('gattserverdisconnected', onBleDisconnected);
+      log("— Conectando por Bluetooth... —");
+      const server = await bleDevice.gatt.connect();
+      const service = await server.getPrimaryService(BLE_SERVICE);
+      bleRx = await service.getCharacteristic(BLE_RX);
+      bleTx = await service.getCharacteristic(BLE_TX);
+      bleTx.addEventListener('characteristicvaluechanged', onBleNotify);
+      await bleTx.startNotifications();
+
+      transport = 'ble';
+      connected = true;
+      bleRxBuf = [];
+
+      const r = await bleRequest(new Uint8Array([0x00]), 0x01);   // InfoRequest -> InfoResponse
+      const dv = new DataView(r.buffer, r.byteOffset, r.byteLength);
+      bleInfo = { maxPacket: dv.getUint16(9, true), maxChunk: dv.getUint16(13, true) };
+      log("— Hub conectado. Paquete máx.: " + bleInfo.maxPacket + " B, trozo máx.: " + bleInfo.maxChunk + " B —");
+
+      setHub("¡Conectado por Bluetooth!", true);
+      $('connectBtn').disabled = true;
+      $('connectBleBtn').disabled = true;
+      $('disconnectBtn').disabled = false;
+      $('uploadBtn').disabled = false;
+      $('testBtn').disabled = false;
+      log("Pulsa «1) Subir y ejecutar bridge».");
+      lastKey = "";
+    } catch (err) {
+      try { if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect(); } catch (e) {}
+      bleCleanup();
+      alert("Error al conectar por Bluetooth: " + err +
+            "\n\nComprueba que el hub está encendido, con Bluetooth activo y que no está conectado a la app oficial de LEGO ni a otro dispositivo.");
+    }
+  });
+
+  // Subida del bridge al slot 0 y ejecución
+  async function bleUploadAndRun() {
+    const code = BRIDGE.replace("USE_STDIN = True", "USE_STDIN = False");
+    const program = new TextEncoder().encode(code);
+
+    log("— BLE: limpiando slot " + BRIDGE_SLOT + " —");
+    await bleRequest(new Uint8Array([0x46, BRIDGE_SLOT]), 0x47);
+
+    const name = new TextEncoder().encode("program.py");
+    const start = new Uint8Array(1 + name.length + 1 + 1 + 4);
+    start[0] = 0x0C;
+    start.set(name, 1);
+    start[1 + name.length] = 0;
+    start[2 + name.length] = BRIDGE_SLOT;
+    new DataView(start.buffer).setUint32(3 + name.length, crcPadded(program), true);
+    const sr = await bleRequest(start, 0x0D);
+    if (sr[1] !== 0) throw new Error("el hub rechazó la subida del archivo");
+
+    const chunkSize = Math.max(4, Math.floor((bleInfo.maxChunk || 512) / 4) * 4);
+    let running = 0;
+    for (let i = 0; i < program.length; i += chunkSize) {
+      const part = program.slice(i, i + chunkSize);
+      running = crcPadded(part, running);
+      const m = new Uint8Array(1 + 4 + 2 + part.length);
+      m[0] = 0x10;
+      const dv = new DataView(m.buffer);
+      dv.setUint32(1, running, true);
+      dv.setUint16(5, part.length, true);
+      m.set(part, 7);
+      const cr = await bleRequest(m, 0x11);
+      if (cr[1] !== 0) throw new Error("el hub rechazó un trozo del archivo");
+    }
+    log("— BLE: programa subido (" + program.length + " B). Iniciando... —");
+    const pr = await bleRequest(new Uint8Array([0x1E, 0x00, BRIDGE_SLOT]), 0x1F);
+    if (pr[1] !== 0) throw new Error("el hub no pudo iniciar el programa");
+    log("— Bridge iniciado. Espera a ver ready y la distancia. —");
+  }
+
+  // Desconexión
+  async function bleDisconnect() {
+    try { await bleSendJSON({ cmd: "stop" }, true); } catch (e) {}
+    try { await bleSendMessage(new Uint8Array([0x1E, 0x01, BRIDGE_SLOT])); } catch (e) {} // detener el programa
+    await sleep(200);
+    const dev = bleDevice;
+    bleCleanup();
+    try { if (dev && dev.gatt.connected) dev.gatt.disconnect(); } catch (e) {}
+  }
+
+  function onBleDisconnected() {
+    if (transport === 'ble') {
+      log("— Bluetooth desconectado —");
+      bleCleanup();
+    }
+  }
+
+  function bleCleanup() {
+    connected = false;
+    transport = null;
+    uploading = false;
+    bleRx = bleTx = null;
+    bleRxBuf = [];
+    bleBusy = false;
+    bleChain = Promise.resolve();
+    bleWaiters.forEach(w => clearTimeout(w.timer));
+    bleWaiters = [];
+    distance = null;
+    $('dist').textContent = "—";
+    setHub("Desconectado", false);
+    $('connectBtn').disabled = false;
+    $('connectBleBtn').disabled = false;
+    $('disconnectBtn').disabled = true;
+    $('uploadBtn').disabled = true;
+    $('testBtn').disabled = true;
+  }
 
   // ---------- Mando ----------
   window.addEventListener("gamepadconnected", e => {
