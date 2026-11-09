@@ -235,6 +235,8 @@
   }
 
   .bar > i {
+    position: absolute;
+    display: block;
     top: 0;
     bottom: 0;
     border-radius: 20px;
@@ -243,9 +245,19 @@
   }
 
   .bar::after {
+    content: "";
+    position: absolute;
+    left: 50%; top: 0; bottom: 0;
     width: 1px;
     background: rgba(255,255,255,.45);
   }
+  #distBar {
+    position: fixed; top: 8px; right: 8px; z-index: 99;
+    padding: 7px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: rgba(8,13,22,.92);
+    font: 800 13px ui-monospace, Consolas, monospace; color: var(--accent-2);
+  }
+  #distBar.near { color: #fff; background: var(--red); }
 
   label {
     display: flex;
@@ -355,6 +367,7 @@
 </style>
 </head>
 <body>
+<div id="distBar">Dist: <span id="dist2">—</span></div>
 <h1>Tanque LEGO SPIKE Prime (USB / Bluetooth)</h1>
 
 <div class="live-dashboard" aria-label="Panel de conducción en directo">
@@ -434,10 +447,11 @@
   <label><input type="checkbox" id="invL"> Invertir motores izquierdos (A, B)</label>
   <label><input type="checkbox" id="invR" checked> Invertir motores derechos (C, D)</label>
   <label><input type="checkbox" id="invE"> Invertir torreta (E)</label>
-  <label><input type="checkbox" id="obsStop"> Frenar al avanzar si hay obstáculo a menos de
+  <label><input type="checkbox" id="obsStop" checked> Parar todo (menos torreta) si hay obstáculo a menos de
     <input type="number" id="obsDist" value="10" min="3" max="100" style="width:60px"> cm</label>
   <div class="status">Límite de velocidad: <span id="limit">50</span>% <span id="brk" style="color:#ff4444"></span></div>
-  <small>D-Pad ↑/↓: ±5% · A: 20% · X: 50% · Y: 100% · B (mantener): freno</small>
+  <div class="status">Velocidad torreta: <span id="tlim" style="color:var(--accent-2)">60</span>%</div>
+  <small>D-Pad ↑/↓: ±5% · A: 20% · X: 50% · Y: 100% · B (mantener): freno total · ZL: freno gradual · L/R: torreta −/+5%</small>
   <div class="status">Distancia (F): <span id="dist">—</span></div>
 </div>
 
@@ -451,6 +465,13 @@
   let bridgeReady = false;
 
   const $ = id => document.getElementById(id);
+  const MAXD = 200;
+  function setDist(d) {
+    distance = d;
+    const t = d === null ? "—" : d + " cm";
+    $('dist').textContent = t;
+    $('dist2').textContent = t;
+  }
 
   function setHub(text, ok) {
     $('hubStatus').textContent = text;
@@ -499,9 +520,8 @@
     try { if (writer) { writer.releaseLock(); } } catch (e) {}
     try { await port.close(); } catch (e) {}
     port = writer = reader = null;
-    distance = null;
     bridgeReady = false;
-    $('dist').textContent = "—";
+    setDist(null);
     setHub("Desconectado", false);
     $('connectBtn').disabled = false;
     $('connectBleBtn').disabled = false;
@@ -551,8 +571,7 @@
     try {
       const msg = JSON.parse(txt.slice(a, b + 1));
       if ("dist" in msg) {
-        distance = msg.dist;
-        $('dist').textContent = (distance === null) ? "sin lectura" : distance + " cm";
+        setDist(msg.dist === null ? MAXD : msg.dist);
       } else {
         log(txt.slice(a, b + 1));
       }
@@ -568,19 +587,21 @@
   async function send(obj, force = false) {
     // Por BLE solo enviar motores cuando el bridge está corriendo (evita reinicio del hub)
     if (transport === 'ble') {
-      if (!bridgeReady && !force) return;
+      if (!bridgeReady && !force) return false;
       return bleSendJSON(obj, force);
     }
-    if (!connected || !writer) return;
-    if (sending && !force) return; // evita acumular mensajes
+    if (!connected || !writer) return false;
+    if (sending && !force) return false; // evita acumular mensajes
     sending = true;
     try {
       await writer.write(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
     } catch (e) {
       console.error(e);
+      return false;
     } finally {
       sending = false;
     }
+    return true;
   }
 
   // ---------- Registro, subida del bridge y prueba ----------
@@ -616,7 +637,7 @@ MOTORS = {"A": port.A, "B": port.B, "C": port.C, "D": port.D, "E": port.E}
 DIST_PORT = port.F
 SPEED_SCALE = 10
 WATCHDOG_MS = 600
-DIST_EVERY_MS = 200
+DIST_EVERY_MS = 50
 
 # Canal "tunnel": mensajes de la pagina por Bluetooth
 tunnel = None
@@ -663,21 +684,53 @@ def stop_all():
     for n in MOTORS:
         set_speed(n, 0)
 
-def read_distance():
+last_ok = 200
+bad = 0
+raw = None
+err_sent = False
+
+def read_one():
+    global last_ok, bad, raw, err_sent
     try:
         d = distance_sensor.distance(DIST_PORT)
+        raw = d
         if d is not None and d >= 0:
-            return int(d / 10)
-    except Exception:
-        pass
-    return None
+            last_ok = min(200, int(d / 10))
+            bad = 0
+            return last_ok
+    except Exception as e:
+        raw = "ERR"
+        if not err_sent:
+            err_sent = True
+            emit({"err": "sensor F: " + str(e)})
+    # Sin lectura: si justo antes estaba muy cerca, es la zona ciega -> 0 cm (unos 2 s)
+    bad += 1
+    if last_ok <= 15 and bad < 40:
+        return 0
+    last_ok = 200
+    return 200
+
+hist = [200, 200, 200]
+cur_dist = 200
+obs_lim = 0
+last_emit = 0
+
+def read_distance():
+    hist.pop(0)
+    hist.append(read_one())
+    return sorted(hist)[1]  # mediana de 3: quita lecturas sueltas falsas
 
 def handle(req):
     cmd = req.get("cmd")
+    global obs_lim
     if cmd == "motors":
+        obs_lim = req.get("obs", 0)
         for n in MOTORS:
             if n in req:
-                set_speed(n, req[n])
+                if obs_lim and cur_dist <= obs_lim and n != "E":
+                    set_speed(n, 0)
+                else:
+                    set_speed(n, req[n])
     elif cmd == "motor.run":
         set_speed(req.get("port"), req.get("speed", 0))
     elif cmd == "stop":
@@ -694,7 +747,7 @@ def on_tunnel(data):
         emit({"err": str(e)})
 
 def run():
-    global last_cmd, last_dist, stopped
+    global last_cmd, last_dist, stopped, cur_dist, last_emit
     if tunnel is not None:
         try:
             tunnel.callback(on_tunnel)
@@ -720,7 +773,14 @@ def run():
             stopped = True
         if utime.ticks_diff(now, last_dist) > DIST_EVERY_MS:
             last_dist = now
-            emit({"dist": read_distance()})
+            d = read_distance()
+            if obs_lim and d <= obs_lim:
+                for n in "ABCD":
+                    set_speed(n, 0)
+            if d != cur_dist or utime.ticks_diff(now, last_emit) > 200:
+                emit({"dist": d})
+                last_emit = now
+            cur_dist = d
 
 run()
 `;
@@ -757,10 +817,11 @@ run()
     if (!connected) return;
     log("— Prueba: motor A 40% durante 1 s —");
     uploading = true; // pausa el bucle del mando
-    await send({ cmd: "motors", A: 40 }, true);
-    await sleep(1000);
-    await send({ cmd: "stop" }, true);
-    uploading = false;
+    try {
+      await send({ cmd: "motors", A: 40 }, true);
+      await sleep(1000);
+      await send({ cmd: "stop" }, true);
+    } finally { uploading = false; }
   });
 
   // ---------- Bluetooth (protocolo SPIKE App 3, servicio GATT FD02) ----------
@@ -877,11 +938,9 @@ run()
 
   function bleSendMessage(bytes) {
     const frame = cobsPack(bytes);
-    bleChain = bleChain.then(() => bleWriteFrame(frame)).catch(e => {
-      log("BLE write: " + e);
-      throw e;
-    });
-    return bleChain;
+    const p = bleChain.then(() => bleWriteFrame(frame));
+    bleChain = p.catch(e => log("BLE write: " + e));
+    return p;
   }
 
   function bleRequest(bytes, expectType, timeout = 8000) {
@@ -902,8 +961,8 @@ run()
 
   // Comandos del mando: mensaje TunnelMessage (0x32) con el mismo JSON que usa el bridge por USB
   async function bleSendJSON(obj, force = false) {
-    if (!connected || !bleRx) return;
-    if (bleBusy && !force) return;
+    if (!connected || !bleRx) return false;
+    if (bleBusy && !force) return false;
     bleBusy = true;
     try {
       const p = new TextEncoder().encode(JSON.stringify(obj));
@@ -913,6 +972,9 @@ run()
       msg[2] = p.length >> 8;
       msg.set(p, 3);
       await bleSendMessage(msg);
+      return true;
+    } catch (e) {
+      return false;
     } finally {
       bleBusy = false;
     }
@@ -1138,8 +1200,7 @@ run()
     bleChain = Promise.resolve();
     bleWaiters.forEach(w => clearTimeout(w.timer));
     bleWaiters = [];
-    distance = null;
-    $('dist').textContent = "—";
+    setDist(null);
     setHub("Desconectado", false);
     $('connectBtn').disabled = false;
     $('connectBleBtn').disabled = false;
@@ -1160,6 +1221,7 @@ run()
 
   let padBlocked = false;
   let lastPadId = "";
+  let turretMax = 60;     // velocidad máx. torreta (%), L/R
   let maxPct = 50;        // límite de velocidad (%)
   const prevBtn = {};     // estado previo de botones, para detectar pulsaciones
   function getPad() {
@@ -1180,7 +1242,8 @@ run()
     $('gpStatus').className = 'status red';
   }
 
-  const dz = v => Math.abs(v) < 0.12 ? 0 : v;
+  const dz = v => Math.abs(v) < 0.15 ? 0 : v;
+  const STEER_GAIN = 0.5;
   const clamp = v => Math.max(-100, Math.min(100, Math.round(v)));
 
   function showMotor(k, v) {
@@ -1207,14 +1270,20 @@ run()
     if (edge(0)) maxPct = 20;                          // A
     if (edge(2)) maxPct = 50;                          // X
     if (edge(3)) maxPct = 100;                         // Y
-    const braking = btn(1);                            // B: freno mientras se mantiene
+    if (edge(4)) turretMax = Math.max(10, turretMax - 5);   // L (LB): torreta más lenta
+    if (edge(5)) turretMax = Math.min(100, turretMax + 5);  // R (RB): torreta más rápida
+    $('tlim').textContent = turretMax;
+    const zl = (gp && gp.buttons[6]) ? gp.buttons[6].value : 0;   // ZL: freno proporcional (0-1)
+    const zlb = zl < 0.05 ? 0 : zl;
+    const braking = btn(1);                            // B: freno total mientras se mantiene
     $('limit').textContent = maxPct;
-    $('brk').textContent = braking ? "· FRENO" : "";
+    $('brk').textContent = braking ? "· FRENO" : zlb ? "· FRENO " + Math.round(zlb * 100) + "%" : "";
+    $('distBar').classList.toggle('near', distance !== null && distance < Number($('obsDist').value));
 
     let throttle = 0, steer = 0, turret = 0;
 
     if (gp) {
-      steer    = dz(gp.axes[0] || 0);     // stick izq. horizontal
+      steer    = dz(gp.axes[0] || 0); steer = steer * Math.abs(steer) * STEER_GAIN;     // stick izq. horizontal
       throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
       turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
     }
@@ -1235,21 +1304,22 @@ run()
     $('liveAxisY').textContent = gp ? (gp.axes[1] || 0).toFixed(2) : '0.00';
     $('liveAxisX').textContent = gp ? (gp.axes[0] || 0).toFixed(2) : '0.00';
     $('liveAxisRX').textContent = gp ? (gp.axes[2] || 0).toFixed(2) : '0.00';
-    $('liveBrake').textContent = braking ? 'ON' : 'OFF';
-    $('liveBrake').style.color = braking ? 'var(--red)' : 'var(--green)';
+    $('liveBrake').textContent = braking ? 'ON' : zlb ? Math.round(zlb * 100) + '%' : 'OFF';
+    $('liveBrake').style.color = (braking || zlb) ? 'var(--red)' : 'var(--green)';
 
     // Freno de obstáculos (solo al avanzar)
-    if ($('obsStop').checked && distance !== null && distance < Number($('obsDist').value) && throttle > 0) {
-      throttle = 0;
-    }
+    const obsOn = $('obsStop').checked, lim = Number($('obsDist').value) || 0;
+    const obs = obsOn ? lim : 0;  // el hub también corta A-D por su cuenta al bajar del límite
+    if (obsOn && distance !== null && distance <= lim) { throttle = 0; steer = 0; }  // todo parado salvo torreta
 
     // Mezcla tipo tanque
     let left = throttle + steer;
     let right = throttle - steer;
     const m = Math.max(1, Math.abs(left), Math.abs(right));
     const k = maxPct / 100;
-    left = braking ? 0 : left / m * 100 * k;
-    right = braking ? 0 : right / m * 100 * k;
+    const f = braking ? 0 : 1 - zlb;   // ZL reduce la velocidad; a fondo = parada
+    left = left / m * 100 * k * f;
+    right = right / m * 100 * k * f;
 
     const sL = $('invL').checked ? -1 : 1;
     const sR = $('invR').checked ? -1 : 1;
@@ -1260,24 +1330,23 @@ run()
       B: clamp(left * sL),
       C: clamp(right * sR),
       D: clamp(right * sR),
-      E: clamp(turret * 60 * sE)
+      E: clamp(turret * turretMax * sE)
     };
 
     for (const k of Object.keys(motors)) showMotor(k, motors[k]);
 
-    const msg = { cmd: "motors", ...motors };
-    const key = JSON.stringify(motors);
+    const msg = { cmd: "motors", ...motors, obs };
+    const key = JSON.stringify(msg);
     const now = performance.now();
     // Enviar si cambia, o como latido cada 200 ms (el hub frena si no recibe nada)
     if (!uploading && (key !== lastKey || now - lastSend > 200)) {
-      lastKey = key;
-      lastSend = now;
-      send(msg);
+      send(msg).then(ok => { if (ok !== false) { lastKey = key; lastSend = now; } });
     }
   }, 50);
 
   // Frenar si se cierra la pestaña
   window.addEventListener("beforeunload", () => {
+    if (connected && transport === 'ble') send({ cmd: "stop" }, true);
     if (connected && writer) {
       writer.write(new TextEncoder().encode(JSON.stringify({ cmd: "stop" }) + "\n"));
     }
