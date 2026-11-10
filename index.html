@@ -257,6 +257,12 @@
     border: 1px solid var(--line); background: rgba(8,13,22,.92);
     font: 800 13px ui-monospace, Consolas, monospace; color: var(--accent-2);
   }
+  #radar {
+    position: fixed; top: 46px; right: 8px; z-index: 98;
+    width: 130px; height: 130px; border-radius: 50%;
+    background: rgba(8,13,22,.88); border: 1px solid var(--line);
+    display: none;
+  }
   #distBar.near { color: #fff; background: var(--red); }
 
   label {
@@ -367,6 +373,7 @@
 </style>
 </head>
 <body>
+<canvas id="radar" width="160" height="160"></canvas>
 <div id="distBar">Dist: <span id="dist2">—</span></div>
 <h1>Tanque LEGO SPIKE Prime (USB / Bluetooth)</h1>
 
@@ -421,7 +428,7 @@
     <button id="testBtn" disabled style="font-size:15px;padding:10px 16px">2) Probar motor A</button>
   </div>
   <pre id="log" style="background:#000;color:#9f9;font-size:12px;height:120px;overflow:auto;white-space:pre-wrap;margin:8px 0;padding:6px;border-radius:6px">Registro del hub...</pre>
-  <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el USB y el Bluetooth del hub solo admiten una conexión a la vez. Usa Chrome o Edge. Para Bluetooth, enciende el hub y elige su nombre en la lista; después pulsa «1) Subir y ejecutar bridge».</small>
+  <small>Cierra la web oficial de LEGO (o desconecta el hub allí) antes de conectar: el USB y el Bluetooth del hub solo admiten una conexión a la vez. Usa un navegador basado en Chromium (Chrome, Edge, Opera, Opera GX...) en Windows, macOS o Linux; Firefox y Safari no sirven. Para Bluetooth, enciende el hub y elige su nombre en la lista; después pulsa «1) Subir y ejecutar bridge».</small>
 </div>
 
 <div class="box">
@@ -447,12 +454,18 @@
   <label><input type="checkbox" id="invL"> Invertir motores izquierdos (A, B)</label>
   <label><input type="checkbox" id="invR" checked> Invertir motores derechos (C, D)</label>
   <label><input type="checkbox" id="invE"> Invertir torreta (E)</label>
+  <label><input type="checkbox" id="invS" checked> Invertir giro (izquierda ↔ derecha)</label>
   <label><input type="checkbox" id="obsStop" checked> Parar todo (menos torreta) si hay obstáculo a menos de
     <input type="number" id="obsDist" value="10" min="3" max="100" style="width:60px"> cm</label>
   <div class="status">Límite de velocidad: <span id="limit">50</span>% <span id="brk" style="color:#ff4444"></span></div>
   <div class="status">Velocidad torreta: <span id="tlim" style="color:var(--accent-2)">60</span>%</div>
   <small>D-Pad ↑/↓: ±5% · A: 20% · X: 50% · Y: 100% · B (mantener): freno total · ZL: freno gradual · L/R: torreta −/+5%</small>
+  <label><input type="checkbox" id="radarOn" checked> Radar de la torreta (arriba a la derecha)</label>
+  <label>Relación torreta: <input type="number" id="gear" min="0.1" max="50" step="0.1" value="1" style="width:70px"> grados de motor por grado de torreta</label>
+  <button id="radarC" type="button">Centrar radar (torreta mirando al frente)</button>
+  <label><input type="checkbox" id="vib" checked> Vibrar el mando al acercarse a un obstáculo</label>
   <div class="status">Distancia (F): <span id="dist">—</span></div>
+  <div class="status">Batería del hub: <span id="bat">—</span></div>
 </div>
 
 <script>
@@ -466,6 +479,50 @@
 
   const $ = id => document.getElementById(id);
   const MAXD = 200;
+  // ---- Radar: el sensor va en la torreta; cada lectura (ángulo + distancia) deja un punto que se desvanece ----
+  const RANGE = 100, FADE = 8000;   // alcance dibujado (cm) y tiempo que dura cada punto (ms)
+  let angOff = null, rawAng = 0, theta = 0, pts = [];
+  const rc = $('radar'), rx = rc.getContext('2d');
+  function onAng(a) {
+    rawAng = a;
+    if (angOff === null) angOff = a;   // la torreta se supone al frente al iniciar
+    theta = (a - angOff) / (Number($('gear').value) || 1) * ($('invE').checked ? -1 : 1);
+  }
+  function resetRadar() { angOff = null; pts = []; theta = 0; }
+  function drawRadar() {
+    const on = $('radarOn').checked && connected;
+    rc.style.display = on ? 'block' : 'none';
+    if (!on || document.hidden) return;
+    const W = rc.width, c = W / 2, R = c - 8, now = performance.now();
+    rx.clearRect(0, 0, W, W);
+    rx.strokeStyle = 'rgba(120,160,200,.35)'; rx.lineWidth = 1;
+    rx.beginPath(); rx.arc(c, c, R, 0, 6.2832); rx.moveTo(c + R / 2, c); rx.arc(c, c, R / 2, 0, 6.2832);
+    rx.moveTo(c, c - R); rx.lineTo(c, c + R); rx.moveTo(c - R, c); rx.lineTo(c + R, c); rx.stroke();
+    rx.fillStyle = 'rgba(160,190,220,.7)'; rx.font = '9px sans-serif';
+    rx.fillText(RANGE + ' cm', c + 3, c - R + 10);
+    rx.fillText(RANGE / 2 + '', c + 3, c - R / 2 + 10);
+    pts = pts.filter(p => now - p.t < FADE);
+    for (const p of pts) {
+      const r = p.d / RANGE * R, a = p.a * 0.017453;
+      rx.fillStyle = 'rgba(80,255,140,' + (1 - (now - p.t) / FADE).toFixed(2) + ')';
+      rx.fillRect(c + r * Math.sin(a) - 1.5, c - r * Math.cos(a) - 1.5, 3, 3);
+    }
+    const t = theta * 0.017453;
+    rx.strokeStyle = 'rgba(255,220,80,.9)';
+    rx.beginPath(); rx.moveTo(c, c); rx.lineTo(c + R * Math.sin(t), c - R * Math.cos(t)); rx.stroke();
+    rx.fillStyle = '#fff'; rx.fillRect(c - 2, c - 2, 4, 4);
+  }
+  setInterval(drawRadar, 100);
+  $('radarC').addEventListener('click', () => { angOff = rawAng; pts = []; });
+  let batPct = null;   // porcentaje suavizado (con motores en marcha la tensión baja, es aproximado)
+  function setBat(mv) {
+    if (mv === null) { batPct = null; $('bat').textContent = "—"; $('bat').style.color = ""; return; }
+    if (mv < 100) mv *= 1000;   // por si llega en voltios
+    const p = Math.max(0, Math.min(100, (mv - 6000) / 23));   // 6,0 V = 0 % · 8,3 V = 100 %
+    batPct = batPct === null ? p : batPct * 0.7 + p * 0.3;
+    $('bat').textContent = (mv / 1000).toFixed(1) + " V · ~" + Math.round(batPct) + "%";
+    $('bat').style.color = batPct < 15 ? "var(--red)" : "";
+  }
   function setDist(d) {
     distance = d;
     const t = d === null ? "—" : d + " cm";
@@ -481,7 +538,7 @@
   // ---------- Conexión ----------
   $('connectBtn').addEventListener('click', async () => {
     if (!('serial' in navigator)) {
-      alert("Tu navegador no soporta Web Serial. Usa Chrome o Edge.");
+      alert("Tu navegador no soporta Web Serial. Usa uno basado en Chromium (Chrome, Edge, Opera, Opera GX...). Firefox y Safari no lo soportan.");
       return;
     }
     try {
@@ -502,7 +559,8 @@
       readLoop();
     } catch (err) {
       alert("Error al conectar por USB: " + err +
-            "\n\n¿Está abierta la web oficial de LEGO con el hub conectado? Ciérrala o desconecta el hub allí.");
+            "\n\n¿Está abierta la web oficial de LEGO con el hub conectado? Ciérrala o desconecta el hub allí." +
+            (/Linux/.test(navigator.userAgent) ? "\n\nEn Linux tu usuario debe tener permiso sobre el puerto serie: añádelo al grupo dialout (Ubuntu/Debian) o uucp (Arch) y reinicia la sesión." : ""));
     }
   });
 
@@ -521,7 +579,7 @@
     try { await port.close(); } catch (e) {}
     port = writer = reader = null;
     bridgeReady = false;
-    setDist(null);
+    setDist(null); setBat(null); resetRadar();
     setHub("Desconectado", false);
     $('connectBtn').disabled = false;
     $('connectBleBtn').disabled = false;
@@ -571,7 +629,14 @@
     try {
       const msg = JSON.parse(txt.slice(a, b + 1));
       if ("dist" in msg) {
+        if (msg.ang !== undefined) onAng(msg.ang);
         setDist(msg.dist === null ? MAXD : msg.dist);
+        if (distance < RANGE) {
+          pts.push({ a: theta, d: distance, t: performance.now() });
+          if (pts.length > 300) pts.shift();
+        }
+      } else if ("bat" in msg) {
+        setBat(msg.bat);
       } else {
         log(txt.slice(a, b + 1));
       }
@@ -714,6 +779,21 @@ hist = [200, 200, 200]
 cur_dist = 200
 obs_lim = 0
 last_emit = 0
+last_bat = 0
+last_a = 0
+sent_d = 200
+
+def read_ang():
+    try:
+        return int(motor.relative_position(MOTORS["E"]))   # grados del motor de la torreta
+    except Exception:
+        return 0
+
+def read_batt():
+    try:
+        return int(hub.battery_voltage())   # mV; si el firmware no lo tiene, no se muestra
+    except Exception:
+        return None
 
 def read_distance():
     hist.pop(0)
@@ -747,7 +827,7 @@ def on_tunnel(data):
         emit({"err": str(e)})
 
 def run():
-    global last_cmd, last_dist, stopped, cur_dist, last_emit
+    global last_cmd, last_dist, stopped, cur_dist, last_emit, last_bat, last_a, sent_d
     if tunnel is not None:
         try:
             tunnel.callback(on_tunnel)
@@ -777,10 +857,19 @@ def run():
             if obs_lim and d <= obs_lim:
                 for n in "ABCD":
                     set_speed(n, 0)
-            if d != cur_dist or utime.ticks_diff(now, last_emit) > 200:
-                emit({"dist": d})
+            a = read_ang()
+            dt = utime.ticks_diff(now, last_emit)
+            if ((d != sent_d or abs(a - last_a) >= 4) and dt >= 80) or dt > 200:
+                emit({"dist": d, "ang": a})
                 last_emit = now
+                last_a = a
+                sent_d = d
             cur_dist = d
+        if utime.ticks_diff(now, last_bat) > 5000:
+            last_bat = now
+            v = read_batt()
+            if v is not None:
+                emit({"bat": v})
 
 run()
 `;
@@ -1021,7 +1110,7 @@ run()
   // Conexión DIAGNÓSTICA: cada paso lento y numerado para ver CUÁNDO se apaga el hub
   $('connectBleBtn').addEventListener('click', async () => {
     if (!navigator.bluetooth) {
-      alert("Este navegador no soporta Web Bluetooth. Usa Chrome o Edge (Windows, Mac, Android o ChromeOS).");
+      alert("Este navegador no soporta Web Bluetooth. Usa uno basado en Chromium (Chrome, Edge, Opera, Opera GX...). Firefox y Safari no lo soportan.\n\nEn Linux puede hacer falta activar la bandera «Experimental Web Platform features» en chrome://flags (o opera://flags).");
       return;
     }
     try {
@@ -1200,7 +1289,7 @@ run()
     bleChain = Promise.resolve();
     bleWaiters.forEach(w => clearTimeout(w.timer));
     bleWaiters = [];
-    setDist(null);
+    setDist(null); setBat(null); resetRadar();
     setHub("Desconectado", false);
     $('connectBtn').disabled = false;
     $('connectBleBtn').disabled = false;
@@ -1243,8 +1332,46 @@ run()
   }
 
   const dz = v => Math.abs(v) < 0.15 ? 0 : v;
-  const STEER_GAIN = 0.5;
+  // Giro: zona muerta reescalada (empieza en 0, sin saltos) + curva mixta lineal/cuadrática.
+  // CURVE_LIN: 1 = lineal (más sensible), 0 = cuadrática pura (muy suave al centro)
+  const STEER_DZ = 0.10, CURVE_LIN = 0.6;
+  const steerCurve = v => {
+    const a = Math.abs(v);
+    if (a < STEER_DZ) return 0;
+    const n = (a - STEER_DZ) / (1 - STEER_DZ);
+    return Math.sign(v) * (CURVE_LIN * n + (1 - CURVE_LIN) * n * n);
+  };
+  const STEER_GAIN = 1;     // el giro ya es suave por la curva cuadrática
+  const STEER_DAMP = 0.35;  // a máxima velocidad el giro se reduce un 35 % (parado: giro completo)
+  const TURN_MIN = 0.6;     // el giro nunca baja de este % del motor, aunque el límite sea menor
   const clamp = v => Math.max(-100, Math.min(100, Math.round(v)));
+
+  const PREF = 'tanquePrefs', prefIds = ['invL', 'invR', 'invE', 'invS', 'obsStop', 'vib', 'radarOn'];
+  let saveT = 0, lastPref = '';
+  function savePrefs() {
+    try {
+      const p = { maxPct, turretMax, obsDist: Number($('obsDist').value) || 10, gear: Number($('gear').value) || 1 };
+      prefIds.forEach(id => p[id] = $(id).checked);
+      const t = JSON.stringify(p);
+      if (t !== lastPref) { localStorage.setItem(PREF, t); lastPref = t; }
+    } catch (e) {}
+  }
+  function loadPrefs() {
+    try {
+      const p = JSON.parse(localStorage.getItem(PREF) || 'null');
+      if (!p) return;
+      prefIds.forEach(id => { if (typeof p[id] === 'boolean') $(id).checked = p[id]; });
+      if (Number.isFinite(p.obsDist)) $('obsDist').value = Math.min(100, Math.max(3, p.obsDist));
+      if (Number.isFinite(p.gear)) $('gear').value = Math.min(50, Math.max(0.1, p.gear));
+      if (Number.isFinite(p.maxPct)) maxPct = Math.min(100, Math.max(0, p.maxPct));
+      if (Number.isFinite(p.turretMax)) turretMax = Math.min(100, Math.max(10, p.turretMax));
+      lastPref = JSON.stringify(p);
+    } catch (e) {}
+  }
+  const saveSoon = () => { clearTimeout(saveT); saveT = setTimeout(savePrefs, 500); };
+  document.querySelectorAll('input').forEach(i => i.addEventListener('change', saveSoon));
+  loadPrefs();
+  let lastPk = maxPct + ',' + turretMax, lastVib = 0;
 
   function showMotor(k, v) {
     $('v' + k).textContent = v;
@@ -1257,7 +1384,8 @@ run()
     const gp = getPad();
     if (gp && gp.id !== lastPadId) {
       lastPadId = gp.id;
-      $('gpStatus').textContent = "Conectado: " + gp.id;
+      $('gpStatus').textContent = "Conectado: " + gp.id +
+        (gp.mapping === "standard" ? "" : " (⚠ mapeo no estándar: los botones pueden no coincidir)");
       $('gpStatus').className = 'status green';
     }
     if (gp) {
@@ -1273,19 +1401,22 @@ run()
     if (edge(4)) turretMax = Math.max(10, turretMax - 5);   // L (LB): torreta más lenta
     if (edge(5)) turretMax = Math.min(100, turretMax + 5);  // R (RB): torreta más rápida
     $('tlim').textContent = turretMax;
+    const pk = maxPct + ',' + turretMax;
+    if (pk !== lastPk) { lastPk = pk; saveSoon(); }
     const zl = (gp && gp.buttons[6]) ? gp.buttons[6].value : 0;   // ZL: freno proporcional (0-1)
     const zlb = zl < 0.05 ? 0 : zl;
     const braking = btn(1);                            // B: freno total mientras se mantiene
     $('limit').textContent = maxPct;
     $('brk').textContent = braking ? "· FRENO" : zlb ? "· FRENO " + Math.round(zlb * 100) + "%" : "";
-    $('distBar').classList.toggle('near', distance !== null && distance < Number($('obsDist').value));
+    $('distBar').classList.toggle('near', distance !== null && distance <= Number($('obsDist').value));
 
     let throttle = 0, steer = 0, turret = 0;
 
     if (gp) {
-      steer    = dz(gp.axes[0] || 0); steer = steer * Math.abs(steer) * STEER_GAIN;     // stick izq. horizontal
+      steer    = gp.axes[0] || 0; steer = steerCurve(steer) * STEER_GAIN;     // stick izq. horizontal
       throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
       turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
+      steer *= 1 - STEER_DAMP * Math.abs(throttle);
     }
 
     // Telemetría visual: refleja las entradas ya leídas, sin intervenir en el control.
@@ -1313,13 +1444,15 @@ run()
     if (obsOn && distance !== null && distance <= lim) { throttle = 0; steer = 0; }  // todo parado salvo torreta
 
     // Mezcla tipo tanque
-    let left = throttle + steer;
-    let right = throttle - steer;
-    const m = Math.max(1, Math.abs(left), Math.abs(right));
-    const k = maxPct / 100;
+    // El límite de velocidad afecta al avance; el giro tiene su propio mínimo (TURN_MIN)
+    const k = maxPct / 100, T = Math.max(k, TURN_MIN);
+    const st = steer * ($('invS').checked ? -1 : 1) * T;
+    let left = (throttle * k + st) * 100;
+    let right = (throttle * k - st) * 100;
+    const m = Math.max(100, Math.abs(left), Math.abs(right));
     const f = braking ? 0 : 1 - zlb;   // ZL reduce la velocidad; a fondo = parada
-    left = left / m * 100 * k * f;
-    right = right / m * 100 * k * f;
+    left = left / m * 100 * f;
+    right = right / m * 100 * f;
 
     const sL = $('invL').checked ? -1 : 1;
     const sR = $('invR').checked ? -1 : 1;
@@ -1338,6 +1471,16 @@ run()
     const msg = { cmd: "motors", ...motors, obs };
     const key = JSON.stringify(msg);
     const now = performance.now();
+    // Vibración del mando: más fuerte cuanto más cerca del obstáculo (como mucho cada 150 ms)
+    const zone = Math.max(lim * 3, 30);
+    if (gp && $('vib').checked && distance !== null && distance < zone && now - lastVib > 150) {
+      lastVib = now;
+      const va = gp.vibrationActuator;
+      if (va && va.playEffect) {
+        const st = Math.min(1, Math.max(0.15, (zone - distance) / (zone - lim)));
+        va.playEffect('dual-rumble', { duration: 200, strongMagnitude: st, weakMagnitude: st * 0.6 }).catch(() => {});
+      }
+    }
     // Enviar si cambia, o como latido cada 200 ms (el hub frena si no recibe nada)
     if (!uploading && (key !== lastKey || now - lastSend > 200)) {
       send(msg).then(ok => { if (ok !== false) { lastKey = key; lastSend = now; } });
