@@ -436,6 +436,7 @@
   <div id="gpStatus" class="status red">Pulsa cualquier botón del mando</div>
   <small>Stick izquierdo: conducir · Stick derecho (horizontal): torreta</small>
   <div id="axesInfo" style="font-family:monospace;font-size:12px;color:#9f9;margin-top:8px;text-align:center"></div>
+  <div class="status" id="btnInfo">Botones pulsados: —</div>
 </div>
 
 <br>
@@ -459,10 +460,16 @@
     <input type="number" id="obsDist" value="10" min="3" max="100" style="width:60px"> cm</label>
   <div class="status">Límite de velocidad: <span id="limit">50</span>% <span id="brk" style="color:#ff4444"></span></div>
   <div class="status">Velocidad torreta: <span id="tlim" style="color:var(--accent-2)">60</span>%</div>
-  <small>D-Pad ↑/↓: ±5% · A: 20% · X: 50% · Y: 100% · B (mantener): freno total · ZL: freno gradual · L/R: torreta −/+5%</small>
+  <small>D-Pad ↑/↓: ±5% · A: 20% · X: 50% · Y: 100% · B (mantener): freno total · ZL: freno gradual · ZR (mantener): turbo 100% · Bocina: botón elegido (Menos) · R3 (pulsar stick der.): centrar torreta · Más: barrido radar · L/R: torreta −/+5%</small>
   <label><input type="checkbox" id="radarOn" checked> Radar de la torreta (arriba a la derecha)</label>
   <label>Relación torreta: <input type="number" id="gear" min="0.1" max="50" step="0.1" value="1" style="width:70px"> grados de motor por grado de torreta</label>
-  <button id="radarC" type="button">Centrar radar (torreta mirando al frente)</button>
+  <button id="radarC" type="button">Marcar el frente del radar (torreta mirando al frente)</button>
+  <label>Sonido de bocina: <input type="file" id="hornFile" accept="audio/*"></label>
+  <label>Botón de la bocina (número): <input type="number" id="hornIdx" min="0" max="30" value="8" style="width:60px"> (Menos = 8 normalmente)</label>
+  <div class="status"><span id="hornName">Sin archivo: suena un tono</span> <button id="hornBtn" type="button">Probar</button></div>
+  <button id="turC" type="button">Centrar torreta (R3)</button>
+  <button id="swB" type="button">Barrido radar: OFF (Más)</button>
+  <label>Barrido ± <input type="number" id="swR" min="10" max="180" value="90" style="width:60px"> ° de torreta</label>
   <label><input type="checkbox" id="vib" checked> Vibrar el mando al acercarse a un obstáculo</label>
   <div class="status">Distancia (F): <span id="dist">—</span></div>
   <div class="status">Batería del hub: <span id="bat">—</span></div>
@@ -488,7 +495,54 @@
     if (angOff === null) angOff = a;   // la torreta se supone al frente al iniciar
     theta = (a - angOff) / (Number($('gear').value) || 1) * ($('invE').checked ? -1 : 1);
   }
-  function resetRadar() { angOff = null; pts = []; theta = 0; }
+  // ---- Bocina: sale por el altavoz del ordenador; usa tu archivo de audio o, si no hay, un tono ----
+  let hornAudio = null, ac = null;
+  $('hornFile').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (hornAudio) URL.revokeObjectURL(hornAudio.src);
+    hornAudio = new Audio(URL.createObjectURL(f));
+    $('hornName').textContent = f.name;
+  });
+  let hornOsc = null;
+  function horn() {
+    // Si ya está sonando, pulsar otra vez lo para
+    if (hornAudio && !hornAudio.paused) { hornAudio.pause(); hornAudio.currentTime = 0; return; }
+    if (hornOsc) { try { hornOsc.stop(); } catch (e) {} hornOsc = null; return; }
+    if (hornAudio) { hornAudio.currentTime = 0; hornAudio.play().catch(() => {}); return; }
+    try {
+      ac = ac || new AudioContext();
+      if (ac.state === 'suspended') ac.resume();
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'square'; o.frequency.value = 380; g.gain.value = 0.15;
+      o.connect(g); g.connect(ac.destination);
+      o.onended = () => { if (hornOsc === o) hornOsc = null; };
+      hornOsc = o;
+      o.start(); o.stop(ac.currentTime + 0.35);
+    } catch (e) {}
+  }
+  $('hornBtn').addEventListener('click', horn);
+  let sweepOn = false;
+  const updSw = () => { $('swB').textContent = "Barrido radar: " + (sweepOn ? "ON" : "OFF") + " (Más)"; };
+  const ctlSend = o => { if (connected && bridgeReady && !uploading) send(o, true); };
+  function setSweep(on) {
+    if (on === sweepOn) return;
+    if (on) {
+      if (angOff === null) return;   // aún no hay lectura del ángulo
+      const r = (Number($('swR').value) || 90) * (Number($('gear').value) || 1);
+      ctlSend({ cmd: "sweep", on: 1, lo: Math.round(angOff - r), hi: Math.round(angOff + r), v: Math.min(turretMax, 50) });
+    } else {
+      ctlSend({ cmd: "sweep", on: 0 });
+    }
+    sweepOn = on;
+    updSw();
+  }
+  function centerTurret() {
+    if (angOff === null) return;
+    sweepOn = false; updSw();
+    ctlSend({ cmd: "goto", a: Math.round(angOff) });
+  }
+  function resetRadar() { angOff = null; pts = []; theta = 0; sweepOn = false; updSw(); }
   function drawRadar() {
     const on = $('radarOn').checked && connected;
     rc.style.display = on ? 'block' : 'none';
@@ -514,6 +568,8 @@
   }
   setInterval(drawRadar, 100);
   $('radarC').addEventListener('click', () => { angOff = rawAng; pts = []; });
+  $('turC').addEventListener('click', centerTurret);
+  $('swB').addEventListener('click', () => setSweep(!sweepOn));
   let batPct = null;   // porcentaje suavizado (con motores en marcha la tensión baja, es aproximado)
   function setBat(mv) {
     if (mv === null) { batPct = null; $('bat').textContent = "—"; $('bat').style.color = ""; return; }
@@ -782,6 +838,12 @@ last_emit = 0
 last_bat = 0
 last_a = 0
 sent_d = 200
+goto_t = None          # ángulo (grados del motor E) al que ir; None = nada
+sw_on = False          # barrido automático de la torreta
+sw_lo = 0
+sw_hi = 0
+sw_dir = 1
+sw_v = 30
 
 def read_ang():
     try:
@@ -802,18 +864,40 @@ def read_distance():
 
 def handle(req):
     cmd = req.get("cmd")
-    global obs_lim
+    global obs_lim, goto_t, sw_on, sw_lo, sw_hi, sw_dir, sw_v
     if cmd == "motors":
         obs_lim = req.get("obs", 0)
+        busy = goto_t is not None or sw_on
+        if req.get("E", 0) != 0:      # mover el stick de la torreta cancela centrado y barrido
+            goto_t = None
+            sw_on = False
+            busy = False
         for n in MOTORS:
             if n in req:
+                if n == "E" and busy:
+                    continue
                 if obs_lim and cur_dist <= obs_lim and n != "E":
                     set_speed(n, 0)
                 else:
                     set_speed(n, req[n])
     elif cmd == "motor.run":
         set_speed(req.get("port"), req.get("speed", 0))
+    elif cmd == "goto":
+        sw_on = False
+        goto_t = int(req.get("a", 0))
+    elif cmd == "sweep":
+        goto_t = None
+        sw_on = bool(req.get("on", 0))
+        if sw_on:
+            sw_lo = int(req.get("lo", 0))
+            sw_hi = int(req.get("hi", 0))
+            sw_v = int(req.get("v", 30))
+            sw_dir = 1
+        else:
+            set_speed("E", 0)
     elif cmd == "stop":
+        goto_t = None
+        sw_on = False
         stop_all()
 
 def on_tunnel(data):
@@ -827,7 +911,7 @@ def on_tunnel(data):
         emit({"err": str(e)})
 
 def run():
-    global last_cmd, last_dist, stopped, cur_dist, last_emit, last_bat, last_a, sent_d
+    global last_cmd, last_dist, stopped, cur_dist, last_emit, last_bat, last_a, sent_d, goto_t, sw_on, sw_dir
     if tunnel is not None:
         try:
             tunnel.callback(on_tunnel)
@@ -849,6 +933,8 @@ def run():
         else:
             utime.sleep_ms(10)
         if utime.ticks_diff(now, last_cmd) > WATCHDOG_MS and not stopped:
+            goto_t = None
+            sw_on = False
             stop_all()
             stopped = True
         if utime.ticks_diff(now, last_dist) > DIST_EVERY_MS:
@@ -858,6 +944,20 @@ def run():
                 for n in "ABCD":
                     set_speed(n, 0)
             a = read_ang()
+            if goto_t is not None:
+                e = goto_t - a
+                if abs(e) <= 3:
+                    goto_t = None
+                    set_speed("E", 0)
+                else:
+                    v = max(8, min(40, abs(e) // 4))
+                    set_speed("E", v if e > 0 else -v)
+            elif sw_on:
+                if a >= sw_hi:
+                    sw_dir = -1
+                elif a <= sw_lo:
+                    sw_dir = 1
+                set_speed("E", sw_dir * sw_v)
             dt = utime.ticks_diff(now, last_emit)
             if ((d != sent_d or abs(a - last_a) >= 4) and dt >= 80) or dt > 200:
                 emit({"dist": d, "ang": a})
@@ -1350,7 +1450,7 @@ run()
   let saveT = 0, lastPref = '';
   function savePrefs() {
     try {
-      const p = { maxPct, turretMax, obsDist: Number($('obsDist').value) || 10, gear: Number($('gear').value) || 1 };
+      const p = { maxPct, turretMax, obsDist: Number($('obsDist').value) || 10, gear: Number($('gear').value) || 1, swR: Number($('swR').value) || 90, hornIdx: Number($('hornIdx').value) };
       prefIds.forEach(id => p[id] = $(id).checked);
       const t = JSON.stringify(p);
       if (t !== lastPref) { localStorage.setItem(PREF, t); lastPref = t; }
@@ -1362,6 +1462,8 @@ run()
       if (!p) return;
       prefIds.forEach(id => { if (typeof p[id] === 'boolean') $(id).checked = p[id]; });
       if (Number.isFinite(p.obsDist)) $('obsDist').value = Math.min(100, Math.max(3, p.obsDist));
+      if (Number.isFinite(p.hornIdx)) $('hornIdx').value = Math.min(30, Math.max(0, p.hornIdx));
+      if (Number.isFinite(p.swR)) $('swR').value = Math.min(180, Math.max(10, p.swR));
       if (Number.isFinite(p.gear)) $('gear').value = Math.min(50, Math.max(0.1, p.gear));
       if (Number.isFinite(p.maxPct)) maxPct = Math.min(100, Math.max(0, p.maxPct));
       if (Number.isFinite(p.turretMax)) turretMax = Math.min(100, Math.max(10, p.turretMax));
@@ -1390,6 +1492,8 @@ run()
     }
     if (gp) {
       $('axesInfo').textContent = "Ejes: " + Array.from(gp.axes, a => a.toFixed(2)).join(" · ");
+      const bi = "Botones pulsados: " + (Array.from(gp.buttons, (b, i) => b.pressed ? i : -1).filter(i => i >= 0).join(", ") || "—");
+      if ($('btnInfo').textContent !== bi) $('btnInfo').textContent = bi;
     }
     const btn = i => !!(gp && gp.buttons[i] && gp.buttons[i].pressed);
     const edge = i => { const n = btn(i), w = !!prevBtn[i]; prevBtn[i] = n; return n && !w; };
@@ -1399,15 +1503,19 @@ run()
     if (edge(2)) maxPct = 50;                          // X
     if (edge(3)) maxPct = 100;                         // Y
     if (edge(4)) turretMax = Math.max(10, turretMax - 5);   // L (LB): torreta más lenta
+    if (edge(Number($('hornIdx').value))) horn();   // bocina (por defecto Menos = 8); sale por el ordenador
+    if (edge(11)) centerTurret();     // R3 (pulsar stick der.): centrar torreta
+    if (edge(9)) setSweep(!sweepOn);  // Más: barrido automático del radar
     if (edge(5)) turretMax = Math.min(100, turretMax + 5);  // R (RB): torreta más rápida
     $('tlim').textContent = turretMax;
     const pk = maxPct + ',' + turretMax;
     if (pk !== lastPk) { lastPk = pk; saveSoon(); }
     const zl = (gp && gp.buttons[6]) ? gp.buttons[6].value : 0;   // ZL: freno proporcional (0-1)
     const zlb = zl < 0.05 ? 0 : zl;
+    const turbo = btn(7) || (gp && gp.buttons[7] && gp.buttons[7].value > 0.5);   // ZR: turbo mientras se mantiene
     const braking = btn(1);                            // B: freno total mientras se mantiene
     $('limit').textContent = maxPct;
-    $('brk').textContent = braking ? "· FRENO" : zlb ? "· FRENO " + Math.round(zlb * 100) + "%" : "";
+    $('brk').textContent = braking ? "· FRENO" : zlb ? "· FRENO " + Math.round(zlb * 100) + "%" : turbo ? "· TURBO" : "";
     $('distBar').classList.toggle('near', distance !== null && distance <= Number($('obsDist').value));
 
     let throttle = 0, steer = 0, turret = 0;
@@ -1417,6 +1525,7 @@ run()
       throttle = -dz(gp.axes[1] || 0);    // stick izq. vertical (arriba = adelante)
       turret   = dz(gp.axes[2] || 0);     // stick der. horizontal
       steer *= 1 - STEER_DAMP * Math.abs(throttle);
+      if (turret !== 0 && sweepOn) { sweepOn = false; updSw(); }   // mover el stick cancela el barrido
     }
 
     // Telemetría visual: refleja las entradas ya leídas, sin intervenir en el control.
@@ -1445,7 +1554,7 @@ run()
 
     // Mezcla tipo tanque
     // El límite de velocidad afecta al avance; el giro tiene su propio mínimo (TURN_MIN)
-    const k = maxPct / 100, T = Math.max(k, TURN_MIN);
+    const k = (turbo ? 100 : maxPct) / 100, T = Math.max(k, TURN_MIN);
     const st = steer * ($('invS').checked ? -1 : 1) * T;
     let left = (throttle * k + st) * 100;
     let right = (throttle * k - st) * 100;
